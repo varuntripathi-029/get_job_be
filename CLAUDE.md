@@ -38,9 +38,21 @@ uv run celery -A workers.celery_app beat   --loglevel=info
 - **Nine tables.** users, companies, sources, crawl_logs, events, jobs, company_scores, newsletter_subscribers, resumes. Resist adding a tenth without a strong reason.
 - **Database as scheduler.** `sources.next_crawl_at` drives everything. Celery Beat ticks every 60s and selects due rows with `FOR UPDATE SKIP LOCKED`; there is no separate scheduler service and no in-memory schedule to lose on restart.
 - **Deterministic scoring.** `app/scoring/engine.py` is a pure function of stored events — same events in, same score out. LLMs never produce the number, only the events feeding it. Scores are append-only so any historical score is reproducible.
-- **Two-model LLM strategy.** A cheap model gates relevance; only survivors reach the expensive model for structured extraction. A rule-based pre-filter runs before either, at zero cost. Provider is configured per role (`CLASSIFIER_PROVIDER` / `EXTRACTOR_PROVIDER`, each one of `gemini | openai | anthropic | xai`), so the two roles can sit on different vendors. Default is xAI for both; xAI speaks the OpenAI chat-completions protocol, so it reuses the `openai` client with `XAI_BASE_URL`.
+- **Two-model LLM strategy.** A cheap model gates relevance; only survivors reach the expensive model for structured extraction. A rule-based pre-filter runs before either, at zero cost. Provider is configured per role (`CLASSIFIER_PROVIDER` / `EXTRACTOR_PROVIDER`, each one of `gemini | openai | anthropic | groq | xai`), so the two roles can sit on different vendors.
 
-  Cost note: the classifier runs on every page clearing the pre-filter and dominates LLM spend. `gemini-2.5-flash-lite` is $0.10/1M input with a free tier, against ~$1.25/1M for the cheapest Grok. If spend becomes a problem, move the classifier to Gemini and leave the extractor on Grok — that's a two-line `.env` change.
+  Default is **Groq** for both. Groq, xAI and OpenAI all speak the OpenAI chat-completions protocol, so they share one client and differ only by `base_url` (see `settings.base_url_for`); Gemini and Anthropic use their own SDKs.
+
+  Cost note — the classifier runs on every page clearing the pre-filter and dominates LLM spend, so it drives the default:
+
+  | Model | Input | Output |
+  |---|---|---|
+  | `llama-3.1-8b-instant` (groq) | $0.05 | $0.08 |
+  | `openai/gpt-oss-120b` (groq) | $0.15 | $0.60 |
+  | `llama-3.3-70b-versatile` (groq) | $0.59 | $0.79 |
+  | `gemini-2.5-flash-lite` | $0.10 | $0.40 |
+  | cheapest Grok (xai) | $1.00 | $2.00 |
+
+  Groq has a free tier with no card, and batch + prompt caching each cut 50% (stackable). Swapping any role to another vendor is a two-line `.env` change.
 - **ATS-first crawling.** Prefer the tier that gives structured data for the least work: `ats_api` → `rss` → `static_http` → `playwright`. Playwright is quarantined behind `requires_js` and a concurrency semaphore.
 - **Bitemporal events.** `event_occurred_at` (real world) vs `observed_at` (when we saw it). Scoring decays on the former, falling back to the latter.
 - **Categorical columns are TEXT + CHECK**, never Postgres ENUM — adding a value is an ALTER on a constraint, not a type migration.

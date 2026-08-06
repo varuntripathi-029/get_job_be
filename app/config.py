@@ -6,6 +6,12 @@ from typing import Annotated
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+# Providers that can back the classifier or extractor role. groq, xai and
+# openai share the OpenAI chat-completions protocol; gemini and anthropic
+# use their own SDKs.
+PROVIDERS = ("gemini", "openai", "anthropic", "groq", "xai")
+OPENAI_PROTOCOL_PROVIDERS = ("openai", "groq", "xai")
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -44,22 +50,24 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     openai_api_key: str = ""
     anthropic_api_key: str = ""
+    # Groq and xAI both speak the OpenAI chat-completions protocol, so all
+    # three share one client and differ only by base URL.
+    groq_api_key: str = ""
+    groq_base_url: str = "https://api.groq.com/openai/v1"
     xai_api_key: str = ""
-    # xAI speaks the OpenAI chat-completions protocol, so it reuses that client.
     xai_base_url: str = "https://api.x.ai/v1"
 
-    classifier_provider: str = "xai"
-    classifier_model: str = "grok-4.20-0309-non-reasoning"
-    extractor_provider: str = "xai"
-    extractor_model: str = "grok-4.3"
+    classifier_provider: str = "groq"
+    classifier_model: str = "llama-3.1-8b-instant"
+    extractor_provider: str = "groq"
+    extractor_model: str = "openai/gpt-oss-120b"
     llm_max_input_chars: int = 15000
 
     @field_validator("classifier_provider", "extractor_provider")
     @classmethod
     def _known_provider(cls, v: str) -> str:
-        allowed = {"gemini", "openai", "anthropic", "xai"}
-        if v not in allowed:
-            raise ValueError(f"provider must be one of {sorted(allowed)}, got {v!r}")
+        if v not in PROVIDERS:
+            raise ValueError(f"provider must be one of {sorted(PROVIDERS)}, got {v!r}")
         return v
 
     def api_key_for(self, provider: str) -> str:
@@ -67,8 +75,16 @@ class Settings(BaseSettings):
             "gemini": self.gemini_api_key,
             "openai": self.openai_api_key,
             "anthropic": self.anthropic_api_key,
+            "groq": self.groq_api_key,
             "xai": self.xai_api_key,
         }[provider]
+
+    def base_url_for(self, provider: str) -> str | None:
+        """Base URL for OpenAI-protocol providers; None means the SDK default."""
+        return {
+            "groq": self.groq_base_url,
+            "xai": self.xai_base_url,
+        }.get(provider)
 
     @property
     def missing_llm_keys(self) -> list[str]:
