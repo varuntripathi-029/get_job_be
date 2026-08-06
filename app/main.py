@@ -34,8 +34,16 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     logger.info("starting %s env=%s", settings.app_name, settings.environment)
     if not settings.google_client_id:
         logger.warning("GOOGLE_CLIENT_ID is unset — /auth/google will reject requests.")
-    if not settings.gemini_api_key:
-        logger.warning("GEMINI_API_KEY is unset — LLM extraction is disabled.")
+    if missing := settings.missing_llm_keys:
+        logger.warning(
+            "no API key for LLM provider(s) %s — extraction is disabled "
+            "(classifier=%s/%s, extractor=%s/%s)",
+            ", ".join(missing),
+            settings.classifier_provider,
+            settings.classifier_model,
+            settings.extractor_provider,
+            settings.extractor_model,
+        )
     yield
     await engine.dispose()
     logger.info("shutdown complete")
