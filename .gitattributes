@@ -1,0 +1,25 @@
+# Normalize to LF in the repo so the same tree works on Windows, in Docker,
+# and in CI. Without this, git warns on every add and CRLF can leak into
+# files that Linux tools read literally.
+* text=auto eol=lf
+
+# Windows-only files keep CRLF in the working tree.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Binary — never touch these.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.webp binary
+*.pdf  binary
+*.woff binary
+*.woff2 binary
+*.zip  binary
+*.gz   binary
+
+# Generated; collapse in diffs and exclude from language stats.
+uv.lock linguist-generated=true -diff
