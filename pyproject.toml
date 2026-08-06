@@ -31,8 +31,9 @@ dependencies = [
     # Queue
     "celery[redis]>=5.4.0",
     "redis>=5.2.0",
-    # AI / ML
+    # AI / ML — the openai client also drives xAI via its compatible endpoint
     "google-generativeai>=0.8.3",
+    "openai>=1.59.0",
     "pgvector>=0.3.6",
     "numpy>=2.1.0",
     # Email
