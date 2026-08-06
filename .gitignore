@@ -1,0 +1,184 @@
+# =============================================================================
+# Secrets & credentials — keep this block first; nothing below should
+# ever be able to re-include something matched here.
+# =============================================================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.jks
+*.keystore
+secrets/
+credentials.json
+service-account*.json
+token.json
+client_secret*.json
+gha-creds-*.json
+.netrc
+.npmrc
+.pypirc
+.direnv/
+.envrc
+
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# Packaging / build
+build/
+dist/
+sdist/
+wheels/
+*.egg
+*.egg-info/
+.eggs/
+*.manifest
+*.spec
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+virtualenv/
+
+# uv / pip caches.
+# uv.lock is intentionally NOT ignored — it must be committed.
+.uv/
+uv-cache/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# =============================================================================
+# Testing, linting, typing
+# =============================================================================
+.pytest_cache/
+.cache/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+htmlcov/
+nosetests.xml
+.tox/
+.nox/
+.hypothesis/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+.benchmarks/
+
+# Profiling
+*.prof
+*.lprof
+*.pstats
+
+# =============================================================================
+# Project runtime artifacts
+# =============================================================================
+# Celery
+celerybeat-schedule
+celerybeat-schedule.*
+celerybeat.pid
+*.pid
+
+# Alembic bytecode (migration .py files themselves are tracked)
+alembic/versions/__pycache__/
+
+# Playwright
+playwright-browsers/
+ms-playwright/
+playwright-report/
+test-results/
+
+# Uploads and generated media
+uploads/
+media/
+static/generated/
+
+# Logs
+logs/
+*.log
+log/
+
+# Local datastores
+*.db
+*.sqlite
+*.sqlite3
+dump.rdb
+postgres-data/
+redis-data/
+
+# Scratch space
+tmp/
+temp/
+scratch/
+*.bak
+*.tmp
+*.orig
+*.rej
+
+# =============================================================================
+# Notebooks
+# =============================================================================
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# =============================================================================
+# Docker
+# =============================================================================
+docker-compose.override.yml
+docker-compose.*.local.yml
+
+# =============================================================================
+# Editors, IDEs, and local tool state
+# =============================================================================
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.shared.json
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*.swn
+*~
+
+# AI assistant local state (shared config stays tracked)
+.claude/settings.local.json
+.aider*
+.cursorignore
+
+# =============================================================================
+# OS cruft
+# =============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.AppleDouble
+.LSOverride
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+desktop.ini
+$RECYCLE.BIN/
+*.lnk
