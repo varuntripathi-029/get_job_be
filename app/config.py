@@ -39,13 +39,47 @@ class Settings(BaseSettings):
     jwt_access_token_expire_minutes: int = 30
     jwt_refresh_token_expire_days: int = 7
 
-    # LLM
+    # LLM — provider is chosen per role so the cheap classifier and the
+    # expensive extractor can sit on different vendors.
     gemini_api_key: str = ""
     openai_api_key: str = ""
     anthropic_api_key: str = ""
-    classifier_model: str = "gemini-2.0-flash"
-    extractor_model: str = "gemini-1.5-pro"
+    xai_api_key: str = ""
+    # xAI speaks the OpenAI chat-completions protocol, so it reuses that client.
+    xai_base_url: str = "https://api.x.ai/v1"
+
+    classifier_provider: str = "xai"
+    classifier_model: str = "grok-4.20-0309-non-reasoning"
+    extractor_provider: str = "xai"
+    extractor_model: str = "grok-4.3"
     llm_max_input_chars: int = 15000
+
+    @field_validator("classifier_provider", "extractor_provider")
+    @classmethod
+    def _known_provider(cls, v: str) -> str:
+        allowed = {"gemini", "openai", "anthropic", "xai"}
+        if v not in allowed:
+            raise ValueError(f"provider must be one of {sorted(allowed)}, got {v!r}")
+        return v
+
+    def api_key_for(self, provider: str) -> str:
+        return {
+            "gemini": self.gemini_api_key,
+            "openai": self.openai_api_key,
+            "anthropic": self.anthropic_api_key,
+            "xai": self.xai_api_key,
+        }[provider]
+
+    @property
+    def missing_llm_keys(self) -> list[str]:
+        """Providers referenced by a role but with no key configured."""
+        return sorted(
+            {
+                provider
+                for provider in (self.classifier_provider, self.extractor_provider)
+                if not self.api_key_for(provider)
+            }
+        )
 
     # News APIs (all optional — features degrade gracefully when unset)
     newsapi_key: str = ""
