@@ -10,10 +10,19 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.exceptions import ConflictError, NotFoundError, ValidationError
-from app.common.pagination import PageParams
+from app.common.pagination import PaginationParams
+from app.companies.models import Company
 from app.crawler.ssrf import validate_url
 from app.sources.models import Source
-from app.sources.schemas import SourceAdminCreate, SourceSubmit, SourceUpdate
+from app.sources.schemas import (
+    CompanySourceGroup,
+    SourceAdminCreate,
+    SourceBrowseItem,
+    SourceBrowseResponse,
+    SourceStats,
+    SourceSubmit,
+    SourceUpdate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -288,7 +297,7 @@ def _apply_filters(
 
 async def list_sources(
     db: AsyncSession,
-    params: PageParams,
+    params: PaginationParams,
     *,
     status: str | None = None,
     company_id: uuid.UUID | None = None,
@@ -312,3 +321,78 @@ async def list_sources(
         .offset(params.offset)
     )
     return list(result.scalars().all()), int(total or 0)
+
+
+async def browse_sources(db: AsyncSession) -> SourceBrowseResponse:
+    """Approved sources grouped by company, for the public coverage page.
+
+    Lets a visitor see what is tracked and spot gaps worth submitting.
+    """
+    result = await db.execute(
+        select(Source, Company.slug, Company.name)
+        .outerjoin(Company, Company.id == Source.company_id)
+        .where(Source.status == "approved")
+        .order_by(Company.name.nullslast(), Source.source_type, Source.url)
+    )
+
+    groups: dict[str, CompanySourceGroup] = {}
+    global_sources: list[SourceBrowseItem] = []
+
+    for source, slug, name in result.all():
+        item = SourceBrowseItem.model_validate(source)
+        if slug is None:
+            # company_id is NULL for news sites and news APIs, which cover many
+            # companies at once.
+            global_sources.append(item)
+            continue
+        if slug not in groups:
+            groups[slug] = CompanySourceGroup(slug=slug, name=name, sources=[])
+        groups[slug].sources.append(item)
+
+    return SourceBrowseResponse(
+        companies=list(groups.values()), global_sources=global_sources
+    )
+
+
+async def source_stats(db: AsyncSession) -> SourceStats:
+    """Coverage summary: how many sources, of what kind, and which companies
+    have none."""
+    by_type = {
+        row[0]: int(row[1])
+        for row in (
+            await db.execute(
+                select(Source.source_type, func.count()).group_by(Source.source_type)
+            )
+        ).all()
+    }
+    by_status = {
+        row[0]: int(row[1])
+        for row in (
+            await db.execute(
+                select(Source.status, func.count()).group_by(Source.status)
+            )
+        ).all()
+    }
+
+    total_companies = int(
+        await db.scalar(
+            select(func.count()).select_from(Company).where(Company.is_active.is_(True))
+        )
+        or 0
+    )
+    with_sources = int(
+        await db.scalar(
+            select(func.count(func.distinct(Source.company_id))).where(
+                Source.company_id.is_not(None), Source.status == "approved"
+            )
+        )
+        or 0
+    )
+
+    return SourceStats(
+        total_sources=sum(by_status.values()),
+        by_type=by_type,
+        by_status=by_status,
+        companies_with_sources=with_sources,
+        companies_without_sources=max(total_companies - with_sources, 0),
+    )
