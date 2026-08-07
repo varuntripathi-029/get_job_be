@@ -81,6 +81,17 @@ Implemented on top of that: search, public dashboard, company comparison, pagina
 
 Not yet implemented: **fetchers, crawler rate limiter, pre-filter, event extraction, dedup, scoring engine, ATS job sync, seed script.** Nothing writes to `events`, `jobs` or `company_scores`, so those tables are empty. Every read endpoint is wired and returns a correct empty result — but the whole product surface stays blank until the pipeline lands. This is the single largest gap.
 
+## Database
+
+Postgres is **Neon** (serverless), not the `docker-compose.yml` in this repo — that is a local-dev fallback. Redis is **Upstash**, TLS-only.
+
+`app/db_url.py` translates a provider connection string into asyncpg's vocabulary. Three things it handles that each cause a confusing failure otherwise:
+- `sslmode` / `channel_binding` are libpq-only; `asyncpg.connect()` has no `**kwargs`, so passing them raises `TypeError`.
+- `ssl` must live in the URL query, not `connect_args` — Alembic builds its own engine from `sqlalchemy.url` alone and would otherwise migrate over an unencrypted connection, which Neon rejects.
+- `str(url)` masks the password as `***`. Always `render_as_string(hide_password=False)`.
+
+A `-pooler` host disables both prepared-statement caches (asyncpg's and SQLAlchemy's); PgBouncer's transaction pooling otherwise causes intermittent "prepared statement does not exist".
+
 ## API conventions
 
 - **Every list endpoint returns `PaginatedResponse`** (`items`, `total`, `page`, `per_page`, `total_pages`, `has_next`, `has_prev`) from `app/common/pagination.py`. Offset-based, not cursor: the biggest table is jobs in the low thousands, and cursor pagination earns its complexity only when deep offsets get slow.
