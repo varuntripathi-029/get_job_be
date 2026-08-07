@@ -11,6 +11,9 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 # use their own SDKs.
 PROVIDERS = ("gemini", "openai", "anthropic", "groq", "xai")
 OPENAI_PROTOCOL_PROVIDERS = ("openai", "groq", "xai")
+# Embeddings are a narrower field: Groq and Anthropic serve no embedding model,
+# so a chat provider is not automatically a valid embedding provider.
+EMBEDDING_PROVIDERS = ("gemini", "openai")
 
 
 class Settings(BaseSettings):
@@ -25,6 +28,8 @@ class Settings(BaseSettings):
     app_name: str = "HireSignal"
     environment: str = "development"
     debug: bool = True
+    # Base for links inside emails. No trailing slash.
+    frontend_url: str = "http://localhost:5173"
     # NoDecode stops pydantic-settings from JSON-parsing this, so the plain
     # comma-separated form in .env reaches the validator below.
     cors_origins: Annotated[list[str], NoDecode] = Field(
@@ -96,6 +101,43 @@ class Settings(BaseSettings):
                 if not self.api_key_for(provider)
             }
         )
+
+    # Embeddings. Groq serves no embedding model, so this is always a separate
+    # provider from the chat roles above. text-embedding-004 is natively 768-dim,
+    # which is what Vector(768) on jobs.embedding / resumes.embedding expects —
+    # changing the model means changing the column and reindexing everything.
+    embedding_provider: str = "gemini"
+    embedding_model: str = "text-embedding-004"
+    embedding_dimensions: int = 768
+    embedding_max_chars: int = 8000
+
+    @field_validator("embedding_provider")
+    @classmethod
+    def _known_embedding_provider(cls, v: str) -> str:
+        if v not in EMBEDDING_PROVIDERS:
+            raise ValueError(
+                f"embedding_provider must be one of {sorted(EMBEDDING_PROVIDERS)}, "
+                f"got {v!r}"
+            )
+        return v
+
+    @property
+    def embeddings_enabled(self) -> bool:
+        return bool(self.api_key_for(self.embedding_provider))
+
+    # Resumes — PII, so uploads are capped and rows expire.
+    max_resume_size_mb: int = 5
+    resume_expiry_days: int = 90
+
+    @property
+    def max_resume_size_bytes(self) -> int:
+        return self.max_resume_size_mb * 1024 * 1024
+
+    # Newsletter. Resend's free tier allows 100 emails/day and rate-limits to
+    # 2 requests/second; we stay under both.
+    newsletter_daily_send_limit: int = 100
+    newsletter_send_delay_seconds: float = 1.0
+    newsletter_confirm_ttl_hours: int = 48
 
     # News APIs (all optional — features degrade gracefully when unset)
     newsapi_key: str = ""
