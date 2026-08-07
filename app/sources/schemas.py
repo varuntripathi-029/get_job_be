@@ -78,3 +78,36 @@ class CrawlerHealthRow(BaseModel):
     content_hash: str | None
     total_crawls: int
     total_events_extracted: int
+
+
+class SourceBrowseItem(BaseModel):
+    """One tracked source, as shown on the public coverage page."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    url: str
+    source_type: str
+    fetch_tier: str
+    last_crawl_at: datetime | None = None
+
+
+class CompanySourceGroup(BaseModel):
+    slug: str
+    name: str
+    sources: list[SourceBrowseItem] = Field(default_factory=list)
+
+
+class SourceBrowseResponse(BaseModel):
+    companies: list[CompanySourceGroup] = Field(default_factory=list)
+    # Sources not tied to a company (news sites, news APIs) crawl across all of
+    # them, so they are listed separately rather than hidden.
+    global_sources: list[SourceBrowseItem] = Field(default_factory=list)
+
+
+class SourceStats(BaseModel):
+    total_sources: int
+    by_type: dict[str, int] = Field(default_factory=dict)
+    by_status: dict[str, int] = Field(default_factory=dict)
+    companies_with_sources: int
+    companies_without_sources: int
