@@ -81,6 +81,15 @@ Implemented on top of that: search, public dashboard, company comparison, pagina
 
 Not yet implemented: **fetchers, crawler rate limiter, pre-filter, event extraction, dedup, scoring engine, ATS job sync, seed script.** Nothing writes to `events`, `jobs` or `company_scores`, so those tables are empty. Every read endpoint is wired and returns a correct empty result — but the whole product surface stays blank until the pipeline lands. This is the single largest gap.
 
+## API conventions
+
+- **Every list endpoint returns `PaginatedResponse`** (`items`, `total`, `page`, `per_page`, `total_pages`, `has_next`, `has_prev`) from `app/common/pagination.py`. Offset-based, not cursor: the biggest table is jobs in the low thousands, and cursor pagination earns its complexity only when deep offsets get slow.
+- **Every error is `{"error": "CODE", "message": "..."}`**, flat, from the `AppError` hierarchy and the handler in `main.py`. `error` is a stable machine code; `message` is for humans and may change wording.
+- **`/companies/compare` is declared before `/companies/{slug}`.** FastAPI matches in definition order, so reordering them makes `compare` resolve as a company slug and 404.
+- **Rate limiting is in-process** (`app/common/rate_limit.py`), not Redis — spending an Upstash command per public request would dwarf the crawl pipeline's usage. Consequence: limits are per-worker and reset on restart, and behind a proxy every client shares one bucket unless the server runs with `--proxy-headers`. It stops casual abuse; it is not a security control.
+- **Dashboard aggregates are cached in process memory**, 5-30 minutes depending on endpoint, for the same reason. Two workers can disagree for up to one TTL.
+- **Search uses two strategies deliberately.** Companies and events match by substring (ILIKE) because users search them by name and "razor" should find "Razorpay". Jobs use the `ix_jobs_fts` GIN index, because descriptions are long prose where stemming and ranking help. The tsvector expression in `search/service.py` must stay character-identical to the one in the index, or Postgres silently drops to a sequential scan.
+
 ## Resumes and matching
 
 Upload → `parser.extract_text` (PyMuPDF for PDF, python-docx for DOCX) → `parse_resume_with_llm` (classifier model, cheap) → embedding → one row per user.
