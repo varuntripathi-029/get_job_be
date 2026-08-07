@@ -14,6 +14,7 @@ from app.auth.schemas import (
     UserResponse,
 )
 from app.common.exceptions import AuthenticationError
+from app.common.rate_limit import rate_limit_auth
 from app.database import get_db
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -21,7 +22,12 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 
-@router.post("/google", response_model=TokenResponse)
+@router.post(
+    "/google",
+    response_model=TokenResponse,
+    summary="Sign in with a Google ID token",
+    dependencies=[Depends(rate_limit_auth)],
+)
 async def google_sign_in(payload: GoogleAuthRequest, db: DbSession) -> TokenResponse:
     """Exchange a Google ID token for a HireSignal token pair."""
     google_payload = service.verify_google_token(payload.credential)
@@ -30,7 +36,12 @@ async def google_sign_in(payload: GoogleAuthRequest, db: DbSession) -> TokenResp
     return TokenResponse(access_token=access_token, refresh_token=refresh_token)
 
 
-@router.post("/refresh", response_model=TokenResponse)
+@router.post(
+    "/refresh",
+    response_model=TokenResponse,
+    summary="Exchange a refresh token",
+    dependencies=[Depends(rate_limit_auth)],
+)
 async def refresh_tokens(payload: RefreshRequest, db: DbSession) -> TokenResponse:
     """Exchange a valid refresh token for a fresh pair."""
     claims = service.verify_jwt(
