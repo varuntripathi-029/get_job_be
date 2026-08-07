@@ -4,12 +4,20 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
+from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin import service as admin_service
 from app.auth.dependencies import AdminUser
-from app.common.pagination import Page, PageParams, page_params
+from app.common.exceptions import ValidationError
+from app.common.pagination import PaginatedResponse, PaginationParams, get_pagination
+from app.config import settings
 from app.database import get_db
+from app.newsletter import sender, tokens
+from app.newsletter import service as newsletter_service
+from app.newsletter.generator import generate_newsletter
+from app.newsletter.schemas import SendResult, SubscriberAdminResponse
+from app.newsletter.templates import render_newsletter_html
 from app.sources import service as source_service
 from app.sources.schemas import (
     CrawlerHealthRow,
@@ -22,15 +30,15 @@ from app.sources.schemas import (
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
-Pagination = Annotated[PageParams, Depends(page_params)]
+Pagination = Annotated[PaginationParams, Depends(get_pagination)]
 
 
-@router.get("/sources/pending", response_model=Page[SourceResponse])
+@router.get("/sources/pending", response_model=PaginatedResponse[SourceResponse])
 async def pending_sources(
     db: DbSession, params: Pagination, _admin: AdminUser
-) -> Page[SourceResponse]:
+) -> PaginatedResponse[SourceResponse]:
     sources, total = await source_service.list_sources(db, params, status="pending")
-    return Page.build(
+    return PaginatedResponse.build(
         [SourceResponse.model_validate(s) for s in sources], total, params
     )
 
@@ -92,3 +100,90 @@ async def crawler_health(
 @router.get("/metrics")
 async def instance_metrics(db: DbSession, _admin: AdminUser) -> dict[str, object]:
     return await admin_service.instance_metrics(db)
+
+
+# --- Newsletter --------------------------------------------------------------
+
+
+@router.get(
+    "/newsletter/subscribers",
+    response_model=PaginatedResponse[SubscriberAdminResponse],
+)
+async def list_subscribers(
+    db: DbSession,
+    params: Pagination,
+    _admin: AdminUser,
+    is_active: Annotated[bool | None, Query()] = None,
+) -> PaginatedResponse[SubscriberAdminResponse]:
+    subscribers, total = await newsletter_service.list_subscribers(
+        db, params, is_active=is_active
+    )
+    return PaginatedResponse.build(
+        [SubscriberAdminResponse.model_validate(s) for s in subscribers], total, params
+    )
+
+
+@router.get("/newsletter/preview", response_class=HTMLResponse)
+async def preview_newsletter(db: DbSession, _admin: AdminUser) -> HTMLResponse:
+    """Render this week's newsletter without sending or consuming an edition
+    number. The unsubscribe link points at a placeholder id, so it renders but
+    does not resolve to a real subscriber."""
+    content = await generate_newsletter(
+        db, edition_number=await sender.current_edition_number()
+    )
+    html = render_newsletter_html(
+        content, tokens.unsubscribe_url(uuid.UUID(int=0)), settings.frontend_url
+    )
+    return HTMLResponse(content=html)
+
+
+@router.post("/newsletter/send-now", response_model=SendResult)
+async def send_newsletter_now(
+    db: DbSession,
+    _admin: AdminUser,
+    force: Annotated[bool, Query(description="Send even with no content.")] = False,
+) -> SendResult:
+    """Send immediately, bypassing the Monday schedule."""
+    edition = await sender.next_edition_number()
+    content = await generate_newsletter(db, edition_number=edition)
+
+    if content.is_empty and not force:
+        raise ValidationError(
+            "No movers, hotspots or events in the last 7 days. "
+            "Pass ?force=true to send anyway."
+        )
+
+    subscribers = await newsletter_service.list_active_subscribers(db)
+    return await sender.send_newsletter(db, content, subscribers=subscribers)
+
+
+# --- Operations --------------------------------------------------------------
+
+
+@router.get("/stats/weekly")
+async def weekly_stats(db: DbSession, _admin: AdminUser) -> dict[str, object]:
+    return await admin_service.weekly_stats(db)
+
+
+@router.post("/embeddings/generate")
+async def generate_embeddings(
+    _admin: AdminUser,
+    batch_size: Annotated[int, Query(ge=1, le=500)] = 50,
+) -> dict[str, object]:
+    """Queue an embedding backfill for jobs that have none."""
+    from workers.embeddings import generate_job_embeddings
+
+    task = generate_job_embeddings.delay(batch_size=batch_size)
+    return {"queued": True, "task_id": task.id, "batch_size": batch_size}
+
+
+@router.post("/sources/{source_id}/crawl-now")
+async def crawl_now(
+    source_id: uuid.UUID, db: DbSession, _admin: AdminUser
+) -> dict[str, object]:
+    """Queue an immediate crawl, bypassing next_crawl_at."""
+    source = await source_service.get_source(db, source_id)
+    from workers.crawl import crawl_source
+
+    task = crawl_source.delay(str(source.id))
+    return {"queued": True, "task_id": task.id, "url": source.url}
