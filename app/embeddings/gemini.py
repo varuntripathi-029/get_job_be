@@ -1,16 +1,24 @@
 """Gemini embedding provider.
 
 Uses google-genai, not google-generativeai: the latter reached end of support
-and prints a deprecation warning on import. Same models, current SDK.
+and prints a deprecation warning on import.
 
-text-embedding-004 is natively 768-dimensional, which is what makes it a
-drop-in for the Vector(768) columns.
+gemini-embedding-001 is the only embedding model still served —
+text-embedding-004 was retired and now 404s. It returns 3072 dimensions by
+default, so `output_dimensionality` is set to match the Vector(768) columns.
+
+Truncated vectors come back un-normalised (measured L2 norm 0.579 at 768 dims
+against 1.0 at full width), so they are re-normalised here. Cosine distance is
+scale-invariant and would not care, but L2 and inner-product operators would
+silently return nonsense, and a stored vector should be correct regardless of
+which operator later reads it.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 
 from app.config import settings
 from app.embeddings.base import (
@@ -76,7 +84,10 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         from google.genai import types
 
         prepared = [truncate(t) for t in chunk]
-        config = types.EmbedContentConfig(task_type=task_type)
+        config = types.EmbedContentConfig(
+            task_type=task_type,
+            output_dimensionality=EMBEDDING_DIMENSIONS,
+        )
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
@@ -94,6 +105,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
                         exc,
                     )
                     return [None] * len(chunk)
+
                 await asyncio.sleep(2 ** (attempt - 1))
                 continue
 
@@ -116,7 +128,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
     def _validate(values) -> Vector | None:
         if not values:
             return None
-        vector = list(values)
+        vector = _unit_normalize([float(v) for v in values])
         if len(vector) != EMBEDDING_DIMENSIONS:
             # Storing this would fail at the driver with an opaque pgvector
             # error; naming the real cause here is more useful.
@@ -128,3 +140,16 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
             )
             return None
         return vector
+
+
+def _unit_normalize(vector: Vector) -> Vector:
+    """Scale to unit length.
+
+    Required whenever output_dimensionality is below the model's native width:
+    Gemini normalises the full 3072-dim vector, and truncating it leaves the
+    result shorter than unit length.
+    """
+    norm = math.sqrt(sum(x * x for x in vector))
+    if norm == 0:
+        return vector
+    return [x / norm for x in vector]

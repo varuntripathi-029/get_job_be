@@ -103,11 +103,14 @@ class Settings(BaseSettings):
         )
 
     # Embeddings. Groq serves no embedding model, so this is always a separate
-    # provider from the chat roles above. text-embedding-004 is natively 768-dim,
-    # which is what Vector(768) on jobs.embedding / resumes.embedding expects —
-    # changing the model means changing the column and reindexing everything.
+    # provider from the chat roles above.
+    #
+    # gemini-embedding-001 is the only model Google still serves;
+    # text-embedding-004 was retired and returns 404. It is natively 3072-dim
+    # and asked for 768 to match Vector(768) on jobs.embedding and
+    # resumes.embedding — changing that means a migration and a full re-embed.
     embedding_provider: str = "gemini"
-    embedding_model: str = "text-embedding-004"
+    embedding_model: str = "gemini-embedding-001"
     embedding_dimensions: int = 768
     embedding_max_chars: int = 8000
 
