@@ -9,6 +9,8 @@ dependencies = [
     # Core
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
+    # Required by FastAPI for multipart uploads (resume files)
+    "python-multipart>=0.0.20",
     "sqlalchemy[asyncio]>=2.0.36",
     "asyncpg>=0.30.0",
     "alembic>=1.14.0",
@@ -31,8 +33,10 @@ dependencies = [
     # Queue
     "celery[redis]>=5.4.0",
     "redis>=5.2.0",
-    # AI / ML — the openai client also drives xAI via its compatible endpoint
-    "google-generativeai>=0.8.3",
+    # AI / ML — the openai client also drives Groq and xAI via their
+    # OpenAI-compatible endpoints. google-genai is the supported Gemini SDK;
+    # google-generativeai reached end of support and is deliberately not used.
+    "google-genai>=1.0.0",
     "openai>=1.59.0",
     "pgvector>=0.3.6",
     "numpy>=2.1.0",
@@ -40,6 +44,7 @@ dependencies = [
     "resend>=2.5.0",
     # Documents
     "pymupdf>=1.25.0",
+    "python-docx>=1.1.2",
     # IDs
     "uuid-utils>=0.10.0",
 ]
