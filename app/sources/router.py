@@ -1,4 +1,4 @@
-"""Source routes — user submission and their own submission history.
+"""Source routes — public coverage views, user submission, own history.
 
 Admin-facing source management lives in `app/admin/router.py`.
 """
@@ -9,15 +9,33 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import CurrentUser
-from app.common.pagination import Page, PageParams, page_params
+from app.common.pagination import PaginatedResponse, PaginationParams, get_pagination
 from app.database import get_db
 from app.sources import service
-from app.sources.schemas import SourceResponse, SourceSubmit
+from app.sources.schemas import (
+    SourceBrowseResponse,
+    SourceResponse,
+    SourceStats,
+    SourceSubmit,
+)
 
 router = APIRouter(prefix="/sources", tags=["sources"])
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
-Pagination = Annotated[PageParams, Depends(page_params)]
+Pagination = Annotated[PaginationParams, Depends(get_pagination)]
+
+
+@router.get(
+    "/browse", response_model=SourceBrowseResponse, summary="What is being tracked"
+)
+async def browse(db: DbSession) -> SourceBrowseResponse:
+    """Approved sources grouped by company, so gaps are visible and submittable."""
+    return await service.browse_sources(db)
+
+
+@router.get("/stats", response_model=SourceStats, summary="Coverage summary")
+async def stats(db: DbSession) -> SourceStats:
+    return await service.source_stats(db)
 
 
 @router.post(
@@ -31,11 +49,11 @@ async def submit_source(
     return SourceResponse.model_validate(source)
 
 
-@router.get("/my-submissions", response_model=Page[SourceResponse])
+@router.get("/my-submissions", response_model=PaginatedResponse[SourceResponse])
 async def my_submissions(
     db: DbSession, params: Pagination, user: CurrentUser
-) -> Page[SourceResponse]:
+) -> PaginatedResponse[SourceResponse]:
     sources, total = await service.list_sources(db, params, submitted_by=user.id)
-    return Page.build(
+    return PaginatedResponse.build(
         [SourceResponse.model_validate(s) for s in sources], total, params
     )
