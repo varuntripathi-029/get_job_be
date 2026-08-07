@@ -24,6 +24,9 @@ class ResumeResponse(BaseModel):
     work_mode_preference: str | None
     parsed_at: datetime | None
     expires_at: datetime | None
+    # pending -> processing -> ready | failed. Matching only works at 'ready'.
+    indexing_status: str
+    indexing_error: str | None = None
     has_embedding: bool = False
 
 
@@ -35,6 +38,13 @@ class JobMatchResponse(BaseModel):
 
 class ResumeUploadResponse(BaseModel):
     resume: ResumeResponse
-    matched_job_count: int
-    # Surfaced so the UI can explain an empty match list instead of looking broken.
-    warnings: list[str] = []
+    # Upload returns before parsing finishes, so there is no match count yet.
+    # Poll GET /resumes/me until indexing_status is 'ready'.
+    message: str
+
+
+class JobMatchesResponse(BaseModel):
+    matches: list["JobMatchResponse"]
+    count: int
+    # Explains an empty list: still indexing, indexing failed, or no matches.
+    message: str | None = None

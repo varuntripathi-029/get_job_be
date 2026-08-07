@@ -16,6 +16,10 @@ from app.database import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 EMBEDDING_DIM = 768
 
+# Upload returns as soon as the text is extracted; parsing and embedding happen
+# in a worker. This is how a client knows whether matching is ready yet.
+INDEXING_STATUSES = ("pending", "processing", "ready", "failed")
+
 
 class Resume(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "resumes"
@@ -24,6 +28,10 @@ class Resume(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "work_mode_preference IS NULL OR work_mode_preference IN "
             "('remote', 'hybrid', 'onsite')",
             name="ck_resumes_work_mode_preference",
+        ),
+        CheckConstraint(
+            "indexing_status IN ('pending', 'processing', 'ready', 'failed')",
+            name="ck_resumes_indexing_status",
         ),
     )
 
@@ -51,6 +59,10 @@ class Resume(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     embedding: Mapped[list[float] | None] = mapped_column(
         Vector(EMBEDDING_DIM), nullable=True
     )
+    indexing_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="pending"
+    )
+    indexing_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     extraction_model: Mapped[str | None] = mapped_column(Text, nullable=True)
     parsed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

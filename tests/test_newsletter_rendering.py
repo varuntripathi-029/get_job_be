@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 
+from app.embeddings import build_job_embedding_text, build_resume_embedding_text
 from app.newsletter.schemas import (
     CompanyEntry,
     EventEntry,
@@ -14,7 +15,6 @@ from app.newsletter.templates import (
     render_confirmation_email,
     render_newsletter_html,
 )
-from app.resumes.embeddings import job_embedding_text, resume_embedding_text
 
 BASE = "https://hiresignal.example"
 UNSUB = f"{BASE}/newsletter/unsubscribe?token=abc"
@@ -132,19 +132,19 @@ def test_format_date_is_platform_independent() -> None:
 
 
 def test_resume_embedding_text_joins_parsed_fields() -> None:
-    text = resume_embedding_text(
+    text = build_resume_embedding_text(
         ["Python", "React"], ["engineering"], "senior", ["Bengaluru"]
     )
     assert text == "Python React engineering senior Bengaluru"
 
 
 def test_resume_embedding_text_skips_missing_fields() -> None:
-    assert resume_embedding_text(["Python"], None, None, None) == "Python"
-    assert resume_embedding_text(None, None, None, None) == ""
+    assert build_resume_embedding_text(["Python"], None, None, None) == "Python"
+    assert build_resume_embedding_text(None, None, None, None) == ""
 
 
 def test_job_embedding_text_truncates_the_description() -> None:
-    text = job_embedding_text("Engineer", "Platform", "engineering", "x" * 2000)
+    text = build_job_embedding_text("Engineer", "Platform", "engineering", "x" * 2000)
     # Descriptions end in identical benefits boilerplate; the cap keeps that
     # from washing out the parts that distinguish one role from another.
     assert text.count("x") == 500

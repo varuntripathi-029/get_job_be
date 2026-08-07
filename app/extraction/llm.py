@@ -3,7 +3,7 @@
 One entry point, `complete_json`, used by every prompt in the pipeline. Groq, xAI
 and OpenAI share the OpenAI chat-completions protocol and differ only by base URL;
 Gemini and Anthropic would need their own branches here (only Gemini's embedding
-path is implemented so far — see `app.resumes.embeddings`).
+path is implemented so far — see `app.embeddings`).
 
 Callers get `None` on failure rather than an exception. Extraction is best-effort
 across thousands of pages: one bad response should drop one document, not fail a

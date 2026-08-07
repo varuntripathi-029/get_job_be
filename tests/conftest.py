@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-not-used-in-production")
 
+from app import db_url  # noqa: E402
 from app.database import Base, get_db  # noqa: E402
 from app.main import create_app  # noqa: E402
 
@@ -45,7 +46,10 @@ async def db_engine():
     Skips rather than fails when no Postgres is reachable, so the unit tests
     still run on a machine with nothing started.
     """
-    engine = create_async_engine(TEST_DATABASE_URL, poolclass=None)
+    # Same libpq -> asyncpg translation the app engine applies, so a hosted
+    # test URL with sslmode=... works here too.
+    url, connect_args = db_url.normalize(TEST_DATABASE_URL)
+    engine = create_async_engine(url, poolclass=None, connect_args=connect_args)
     try:
         async with engine.begin() as conn:
             from sqlalchemy import text

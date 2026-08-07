@@ -12,7 +12,7 @@ from app.database import get_db
 from app.jobs.models import ROLE_FAMILIES, SENIORITIES, WORK_MODES
 from app.resumes import service
 from app.resumes.schemas import (
-    JobMatchResponse,
+    JobMatchesResponse,
     ResumeResponse,
     ResumeUploadResponse,
 )
@@ -28,7 +28,12 @@ async def upload_resume(
     db: DbSession,
     file: Annotated[UploadFile, File()],
 ) -> ResumeUploadResponse:
-    """Upload a PDF or DOCX resume. Replaces any previous upload."""
+    """Upload a PDF or DOCX resume. Replaces any previous upload.
+
+    Returns as soon as the file is stored and validated. Parsing and embedding
+    run in a worker — poll `GET /resumes/me` until `indexing_status` is
+    `ready`.
+    """
     # Starlette buffers to disk past a threshold, so this read is bounded by the
     # size check below rather than by memory. content_type is not trusted — it
     # comes from the client — so the real check is on the parsed bytes.
@@ -38,19 +43,21 @@ async def upload_resume(
             f"File is too large. The limit is {settings.max_resume_size_mb}MB."
         )
 
-    resume, warnings = await service.process_resume(
+    resume, needs_indexing = await service.store_upload(
         db, user.id, file_bytes, file.filename or "resume"
     )
 
-    matches = []
-    if resume.embedding is not None:
-        matches = await service.get_matched_jobs(db, user.id, limit=20)
+    if needs_indexing:
+        # Imported here so the API does not depend on the worker package at
+        # import time; a broker outage must not stop the app from booting.
+        from workers.resumes import index_resume
 
-    return ResumeUploadResponse(
-        resume=service.to_response(resume),
-        matched_job_count=len(matches),
-        warnings=warnings,
-    )
+        index_resume.delay(str(resume.id))
+        message = "Resume received. Parsing and matching are being prepared."
+    else:
+        message = "This resume was already processed; nothing changed."
+
+    return ResumeUploadResponse(resume=service.to_response(resume), message=message)
 
 
 @router.get("/me", response_model=ResumeResponse)
@@ -63,7 +70,7 @@ async def delete_my_resume(user: CurrentUser, db: DbSession) -> None:
     await service.delete_resume(db, user.id)
 
 
-@router.get("/matches", response_model=list[JobMatchResponse])
+@router.get("/matches", response_model=JobMatchesResponse)
 async def get_matches(
     user: CurrentUser,
     db: DbSession,
@@ -71,8 +78,12 @@ async def get_matches(
     seniority: Annotated[str | None, Query(pattern="|".join(SENIORITIES))] = None,
     work_mode: Annotated[str | None, Query(pattern="|".join(WORK_MODES))] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
-) -> list[JobMatchResponse]:
-    return await service.get_matched_jobs(
+) -> JobMatchesResponse:
+    """Jobs ranked against the stored resume vector.
+
+    Reads a pre-computed embedding; no provider call happens here.
+    """
+    matches, message = await service.get_matched_jobs(
         db,
         user.id,
         role_family=role_family,
@@ -80,19 +91,22 @@ async def get_matches(
         work_mode=work_mode,
         limit=limit,
     )
+    return JobMatchesResponse(matches=matches, count=len(matches), message=message)
 
 
 @router.post("/refresh-matches", response_model=ResumeUploadResponse)
 async def refresh_matches(user: CurrentUser, db: DbSession) -> ResumeUploadResponse:
-    """Regenerate the resume embedding and re-run matching."""
-    resume, warnings = await service.refresh_embedding(db, user.id)
+    """Re-run parsing and embedding for the stored resume."""
+    resume = await service.require_resume(db, user.id)
+    resume.indexing_status = "pending"
+    resume.indexing_error = None
+    await db.commit()
+    await db.refresh(resume)
 
-    matches = []
-    if resume.embedding is not None:
-        matches = await service.get_matched_jobs(db, user.id, limit=20)
+    from workers.resumes import index_resume
 
+    index_resume.delay(str(resume.id))
     return ResumeUploadResponse(
         resume=service.to_response(resume),
-        matched_job_count=len(matches),
-        warnings=warnings,
+        message="Re-indexing started. Poll /resumes/me until it is ready.",
     )

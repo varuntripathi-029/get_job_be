@@ -31,6 +31,7 @@ celery_app = Celery(
         "workers.score",
         "workers.cleanup",
         "workers.embeddings",
+        "workers.resumes",
         "workers.newsletter",
     ],
 )

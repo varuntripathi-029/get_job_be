@@ -111,9 +111,23 @@ Matching is `pgvector` cosine distance with a 0.55 similarity floor, filtered by
 
 ## Embeddings
 
-**Groq has no embedding endpoint.** `EMBEDDING_PROVIDER` is therefore always a different provider from the chat roles — Gemini by default, whose free tier covers this comfortably. Without `GEMINI_API_KEY`, resume matching and job embeddings are disabled and log a warning at startup; everything else works.
+Everything lives in `app/embeddings/`. Nothing outside that package imports a concrete provider — call `get_provider()` and use the `EmbeddingProvider` ABC. Text construction is centralised in `app/embeddings/text.py`; inline concatenation at a call site is what lets the crawler and the backfill worker embed the same job differently, producing vectors that cannot be compared.
 
-768 dimensions is fixed by `Vector(768)` on `jobs.embedding` and `resumes.embedding`. `generate_embedding` asserts the width and refuses a mismatched vector, because the alternative is an opaque driver error at insert time.
+**Groq has no embedding endpoint**, so `EMBEDDING_PROVIDER` is always a different provider from the chat roles — Gemini by default. Without a key, the job worker skips with a warning, resume indexing records `failed`, and matching returns an explanatory message. Crawling, scoring, search and the dashboard are unaffected: embeddings are an enhancement, not a requirement.
+
+768 dimensions is fixed by `Vector(768)`. Providers validate the width and drop a mismatched vector, because the alternative is an opaque pgvector error at insert time.
+
+**No embedding call ever happens on a read path.** `GET /resumes/matches` reads the stored vector and does pgvector similarity only. Generation happens in workers, and only when the source text actually changed:
+
+- **Batching** — the provider takes 100 inputs per request. Measured on 100 real jobs: 100 calls became 1.
+- **In-batch dedup** — identical embedding text is embedded once and the vector fanned out.
+- **Sibling copy** — a job whose `content_hash` *and* title match an already-embedded posting copies the vector with no call. Companies post the same role in ten cities. Title is compared too, because two different roles at one company often share a description.
+
+## Resume indexing
+
+Upload is deliberately split. The request extracts text, stores the row with `indexing_status='pending'`, and returns; the LLM parse and embedding run in `workers/resumes.py`. The LLM alone was measured at ~14s on a cold model, which is not something to hold an HTTP request open for.
+
+`indexing_status` moves `pending → processing → ready | failed`. Clients poll `GET /resumes/me`. Matching before `ready` returns an empty list plus a message explaining which state it is in, rather than a bare empty array that looks like "no jobs suit you".
 
 ## Newsletter
 

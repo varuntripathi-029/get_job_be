@@ -123,6 +123,12 @@ class Settings(BaseSettings):
 
     @property
     def embeddings_enabled(self) -> bool:
+        """Whether the configured embedding provider has what it needs.
+
+        app.embeddings.embeddings_available() is the canonical check; this
+        stays for the startup banner, which must not import the provider
+        package just to log a warning.
+        """
         return bool(self.api_key_for(self.embedding_provider))
 
     # Resumes — PII, so uploads are capped and rows expire.
