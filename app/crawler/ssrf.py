@@ -73,16 +73,28 @@ def is_blocked_ip(ip: str) -> bool:
     return any(addr in net for net in networks)
 
 
+class HostResolutionError(SSRFError):
+    """DNS did not answer for this host.
+
+    A subclass of SSRFError so submission-time validation still rejects it, but
+    distinguishable at crawl time — a host that does not resolve is dead or the
+    resolver is down, not an attempt to reach an internal address. The crawler
+    retries these with backoff instead of disabling the source outright.
+    """
+
+    error_code = "HOST_UNRESOLVABLE"
+
+
 def resolve_host(hostname: str) -> list[str]:
     """Resolve a hostname to every A/AAAA record it advertises."""
     try:
         infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
-        raise SSRFError(f"Could not resolve host {hostname!r}.") from exc
+        raise HostResolutionError(f"Could not resolve host {hostname!r}.") from exc
 
     addresses = {info[4][0] for info in infos}
     if not addresses:
-        raise SSRFError(f"Host {hostname!r} resolved to no addresses.")
+        raise HostResolutionError(f"Host {hostname!r} resolved to no addresses.")
     return sorted(addresses)
 
 

@@ -26,7 +26,7 @@ from app.crawler.fetchers.static import StaticFetcher
 from app.crawler.models import CrawlLog
 from app.crawler.prefilter import is_relevant
 from app.crawler.rate_limiter import build_rate_limiter
-from app.crawler.ssrf import validate_url
+from app.crawler.ssrf import HostResolutionError, validate_url
 from app.extraction.dedup import deduplicate_event
 from app.extraction.prompts import extract_v1
 from app.extraction.service import classify_content, extract_events
@@ -407,9 +407,22 @@ async def _crawl(db: AsyncSession, source_id: str) -> dict[str, object]:
         logger.info("crawled %s: %s", source.url, summary)
         return {"source": source.url, "events": events, "summary": summary}
 
+    except HostResolutionError as exc:
+        # DNS said nothing. That is a dead host or a resolver blip, not an
+        # attempt to reach somewhere internal — so it backs off like any other
+        # failure and disables only after repeated attempts.
+        await db.rollback()
+        source = await db.get(Source, uuid.UUID(source_id))
+        if source is not None:
+            _schedule_failure(source, f"DNS: {exc}")
+            _log(db, source, "failure", error=str(exc))
+            await db.commit()
+        logger.warning("could not resolve %s: %s", source_id, exc)
+        return {"error": "host_unresolvable", "detail": str(exc)}
+
     except SSRFError as exc:
-        # A source that now resolves somewhere unsafe is not a transient
-        # failure; stop crawling it rather than retrying into a backoff.
+        # Resolved, but to an address we refuse to fetch. That is not transient;
+        # stop crawling it rather than retrying into a backoff.
         await db.rollback()
         source = await db.get(Source, uuid.UUID(source_id))
         if source is not None:
