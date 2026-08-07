@@ -16,14 +16,23 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from app import db_url
 from app.config import settings
 
+# DATABASE_URL may be pasted straight from a hosted provider, which means it can
+# carry libpq-only parameters asyncpg would choke on. See app.db_url.
+DATABASE_URL, CONNECT_ARGS = db_url.normalize(settings.database_url)
+
 engine: AsyncEngine = create_async_engine(
-    settings.database_url,
+    DATABASE_URL,
     echo=settings.debug and not settings.is_production,
+    # Serverless Postgres drops idle connections (Neon autosuspends after ~5
+    # minutes), so a pooled connection is often dead by the time it is reused.
     pool_pre_ping=True,
     pool_size=5,
     max_overflow=10,
+    pool_recycle=300,
+    connect_args=CONNECT_ARGS,
 )
 
 AsyncSessionLocal = async_sessionmaker(
