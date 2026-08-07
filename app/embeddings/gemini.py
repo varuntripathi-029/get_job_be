@@ -31,9 +31,15 @@ from app.embeddings.text import truncate
 
 logger = logging.getLogger(__name__)
 
-# Gemini accepts up to 100 inputs per embed_content call.
-MAX_BATCH = 100
-MAX_ATTEMPTS = 3
+# The API documents 100 inputs per call, but the free tier's per-minute token
+# budget rejects batches that large with 429 well before the count limit is
+# reached. 50 was verified to pass consistently where 98 did not.
+MAX_BATCH = 50
+MAX_ATTEMPTS = 4
+
+# A rate limit is not a failure, just a request to slow down, so it backs off
+# much harder than a transient error before giving up.
+RATE_LIMIT_BACKOFF_SECONDS = (5, 20, 60)
 
 
 class GeminiEmbeddingProvider(EmbeddingProvider):
@@ -106,7 +112,20 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
                     )
                     return [None] * len(chunk)
 
-                await asyncio.sleep(2 ** (attempt - 1))
+                if _is_rate_limit(exc):
+                    delay = RATE_LIMIT_BACKOFF_SECONDS[
+                        min(attempt - 1, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)
+                    ]
+                    logger.warning(
+                        "gemini rate limited on %d texts; waiting %ss (attempt %d/%d)",
+                        len(chunk),
+                        delay,
+                        attempt,
+                        MAX_ATTEMPTS,
+                    )
+                else:
+                    delay = 2 ** (attempt - 1)
+                await asyncio.sleep(delay)
                 continue
 
             embeddings = response.embeddings or []
@@ -153,3 +172,9 @@ def _unit_normalize(vector: Vector) -> Vector:
     if norm == 0:
         return vector
     return [x / norm for x in vector]
+
+
+def _is_rate_limit(exc: Exception) -> bool:
+    """Whether the provider is asking us to slow down rather than failing."""
+    text = str(exc)
+    return "429" in text or "RESOURCE_EXHAUSTED" in text
