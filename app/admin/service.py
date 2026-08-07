@@ -1,5 +1,7 @@
 """Admin read models — crawler health and instance metrics."""
 
+from datetime import UTC, datetime, timedelta
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,6 +10,7 @@ from app.companies.models import Company
 from app.extraction.models import Event
 from app.jobs.models import Job
 from app.newsletter.models import NewsletterSubscriber
+from app.scoring.models import CompanyScore
 from app.sources.models import Source
 from app.sources.schemas import CrawlerHealthRow
 
@@ -79,5 +82,42 @@ async def instance_metrics(db: AsyncSession) -> dict[str, object]:
         "total_users": await _count(db, User),
         "total_subscribers": await _count(
             db, NewsletterSubscriber, NewsletterSubscriber.is_active.is_(True)
+        ),
+    }
+
+
+async def weekly_stats(db: AsyncSession) -> dict[str, object]:
+    """Activity over the last 7 days, for the admin dashboard."""
+    since = datetime.now(UTC) - timedelta(days=7)
+
+    return {
+        "window_days": 7,
+        "since": since.isoformat(),
+        "new_companies": await _count(db, Company, Company.created_at >= since),
+        "new_sources": await _count(db, Source, Source.created_at >= since),
+        "new_events": await _count(
+            db,
+            Event,
+            Event.observed_at >= since,
+            Event.is_canonical.is_(True),
+            Event.status == "active",
+        ),
+        "new_jobs": await _count(db, Job, Job.first_seen_at >= since),
+        "closed_jobs": await _count(db, Job, Job.closed_at >= since),
+        "new_subscribers": await _count(
+            db, NewsletterSubscriber, NewsletterSubscriber.created_at >= since
+        ),
+        "confirmed_subscribers": await _count(
+            db,
+            NewsletterSubscriber,
+            NewsletterSubscriber.confirmed_at >= since,
+        ),
+        "scores_computed": await _count(
+            db, CompanyScore, CompanyScore.scored_at >= since
+        ),
+        # Drives the "matching is degraded" banner: jobs with no vector are
+        # invisible to resume matching.
+        "jobs_missing_embedding": await _count(
+            db, Job, Job.is_active.is_(True), Job.embedding.is_(None)
         ),
     }
