@@ -19,6 +19,15 @@ TEST_DATABASE_URL = os.environ.get(
     "postgresql+asyncpg://hiresignal:hiresignal@localhost:5432/hiresignal_test",
 )
 
+# db_engine calls drop_all in teardown. If TEST_DATABASE_URL ever pointed at the
+# real database, running the suite would destroy it — so refuse outright rather
+# than rely on nobody making that mistake.
+if os.environ.get("DATABASE_URL") == TEST_DATABASE_URL:
+    raise RuntimeError(
+        "TEST_DATABASE_URL must not equal DATABASE_URL — the test fixtures drop "
+        "every table on teardown."
+    )
+
 
 @pytest.fixture
 async def client() -> AsyncGenerator[AsyncClient]:
@@ -70,6 +79,25 @@ async def db_client(db_engine) -> AsyncGenerator[AsyncClient]:
     async def override_get_db() -> AsyncGenerator[AsyncSession]:
         async with factory() as session:
             yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+async def stub_client() -> AsyncGenerator[AsyncClient]:
+    """Client whose get_db yields a stub.
+
+    For endpoints that reject a request before touching the database — argument
+    validation, rate limits — so those tests need no Postgres at all.
+    """
+    app = create_app()
+
+    async def override_get_db():
+        yield None
 
     app.dependency_overrides[get_db] = override_get_db
     transport = ASGITransport(app=app)
