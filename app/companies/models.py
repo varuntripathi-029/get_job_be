@@ -1,6 +1,16 @@
 """Company model — the entity hiring momentum is computed for."""
 
-from sqlalchemy import Boolean, CheckConstraint, Index, Integer, SmallInteger, Text
+from datetime import datetime
+
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Index,
+    Integer,
+    SmallInteger,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -50,6 +60,12 @@ class Company(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     ats_board_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="true"
+    )
+    # Round-robin cursor for the news APIs: they query a batch of companies per
+    # tick, oldest-queried first. Kept in Postgres rather than Redis so cycling
+    # 500 companies costs no Upstash commands.
+    news_last_queried_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
     def __repr__(self) -> str:
