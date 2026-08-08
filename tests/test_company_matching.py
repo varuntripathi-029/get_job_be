@@ -10,7 +10,7 @@ import uuid
 
 import pytest
 
-from app.companies.matcher import CompanyIndex
+from app.companies.matcher import AMBIGUOUS_NAMES, CompanyIndex
 
 
 class FakeCompany:
@@ -67,14 +67,33 @@ def test_finds_the_company(index: CompanyIndex, text: str, expected: str) -> Non
 @pytest.mark.parametrize(
     "text",
     [
+        # A name that is also an ordinary word, used as an ordinary word.
+        "How to build a linear regression model in Python",
+        "The meta description tag still matters for SEO",
+        "Our team is hiring engineers to work on open source infrastructure",
+        "We reduced open connections after the migration, and are hiring",
+        # Right casing, but nothing to suggest the sentence is about a company.
+        "Open the dashboard and select a date range",
         # No tracked company at all.
         "A guide to writing better commit messages",
-        "Quarterly results are due next week",
         "",
     ],
 )
 def test_does_not_invent_a_company(index: CompanyIndex, text: str) -> None:
     assert names(index, text) == []
+
+
+def test_ambiguous_name_matches_when_used_as_a_name(index: CompanyIndex) -> None:
+    """The strict rule must not silence the company outright."""
+    assert names(index, "Open raised $25M in a round led by Tiger") == ["Open"]
+    assert names(index, "Linear has appointed a new CTO") == ["Linear"]
+
+
+def test_ambiguous_names_are_actually_marked_ambiguous() -> None:
+    """A guard on the list itself: these are the names the rule exists for."""
+    assert {"open", "linear", "meta", "slice", "ramp"} <= AMBIGUOUS_NAMES
+    # Not English words, so holding them to the strict rule only loses signal.
+    assert not ({"groww", "razorpay", "swiggy", "rapido"} & AMBIGUOUS_NAMES)
 
 
 def test_longest_name_wins_over_its_own_prefix(index: CompanyIndex) -> None:
