@@ -18,9 +18,13 @@ Every score links back to the evidence that produced it.
 
 🚧 **In development.**
 
-Working: configuration, async database layer, all 9 models with an initial Alembic migration, Google OAuth + JWT sessions, companies CRUD with entity resolution, the source registry with its submission/approval workflow, SSRF protection, and admin crawler-health/metrics endpoints.
+Working: configuration, async database layer, all 9 models with Alembic migrations, Google OAuth + JWT sessions, companies CRUD with entity resolution, the source registry with its submission/approval workflow, SSRF protection, admin crawler-health/metrics endpoints, resume upload/parse/match, embeddings, the newsletter, search and the public dashboard.
 
-Not built yet: the fetchers (ATS/RSS/static/Playwright/news APIs), rate limiter, content pre-filter, LLM extraction, event deduplication, scoring engine, ATS job sync, Celery workers, and the seed script. `source-registry.md` holds the seed input.
+Also working: the crawl pipeline end to end — fetchers (ATS/RSS/static/Playwright/news APIs), rate limiter, content pre-filter, LLM extraction, event deduplication, scoring engine, ATS job sync, Celery workers, and the seed script.
+
+`hiring_intelligence_source_registry.md` holds the seed input. Most of its rows have no career page and no ATS, which is the point rather than a gap: an early-stage company is visible through what is written about it long before it publishes a job board, so those companies are tracked through news, funding coverage and VC posts, and every article is resolved back to a company by name.
+
+Not built yet: the frontend (separate repo).
 
 ## Tech stack
 
