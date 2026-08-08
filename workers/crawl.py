@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.exceptions import SSRFError
+from app.companies.matcher import find_companies_in_text, resolve_event_subject
 from app.companies.models import Company
 from app.config import settings
 from app.crawler.fetchers.base import FetchResult
@@ -114,27 +115,61 @@ def _log(
 
 
 async def _extract_and_store(
-    db: AsyncSession, text: str, company_id: uuid.UUID, source_url: str
-) -> int:
-    """Classify, extract, dedup. Returns how many new events were created."""
+    db: AsyncSession,
+    text: str,
+    company_id: uuid.UUID | None,
+    source_url: str,
+    *,
+    route_per_event: bool = False,
+) -> tuple[int, set[uuid.UUID]]:
+    """Classify, extract, dedup.
+
+    Returns how many new events were created and which companies they landed
+    on, so the caller can rescore exactly those.
+
+    `route_per_event` is for documents with no company attached. A company blog
+    is about one company and every event in it belongs to that company, but a
+    news feed is not: one Entrackr piece can list eight departures across three
+    firms. Attributing all of them to whichever company the article happened to
+    resolve to is how a roundup of moves at one investor gets filed as evidence
+    against an unrelated payments company — which is precisely the claim this
+    product must never make. So each event is attributed by its own words, and
+    an event that names nobody we track is dropped rather than guessed at.
+    """
     classification = await classify_content(text)
     if not classification.is_relevant:
         logger.info("classifier rejected %s: %s", source_url, classification.reason)
-        return 0
+        return 0, set()
 
     extracted = await extract_events(text, source_url)
     created = 0
+    touched: set[uuid.UUID] = set()
+
     for event in extracted:
+        target = company_id
+        if route_per_event:
+            owner = await resolve_event_subject(
+                db, event.title, event.evidence_excerpt
+            )
+            if owner is None:
+                logger.debug("no company in event %r — dropping", event.title[:80])
+                continue
+            target = owner.id
+        if target is None:
+            continue
+
         _, is_new = await deduplicate_event(
             db,
             event,
-            company_id,
+            target,
             source_url,
             extraction_model=settings.extractor_model,
             prompt_version=extract_v1.VERSION,
         )
         created += int(is_new)
-    return created
+        touched.add(target)
+
+    return created, touched
 
 
 # --- per-tier handlers -------------------------------------------------------
@@ -177,7 +212,6 @@ async def _crawl_ats(db: AsyncSession, source: Source) -> tuple[int, str]:
 
 async def _crawl_news(db: AsyncSession, source: Source) -> tuple[int, str]:
     """News APIs sweep a batch of companies rather than one fixed URL."""
-    from app.companies.service import resolve_company
 
     companies = list(
         (
@@ -217,14 +251,19 @@ async def _crawl_news(db: AsyncSession, source: Source) -> tuple[int, str]:
         if not is_relevant(text, source.source_type):
             continue
         # Which company an article is about is not knowable from the query
-        # alone — a piece about Razorpay may mention five other companies.
-        company = await resolve_company(db, f"{article.title} {article.description}")
-        if company is None:
-            logger.debug("no company resolved for article: %s", article.title[:80])
+        # alone — a piece about Razorpay may mention five other companies — so
+        # this only gates whether the article is worth an LLM call. Attribution
+        # happens per event, inside _extract_and_store.
+        if not await find_companies_in_text(db, text):
+            logger.debug("no tracked company in article: %s", article.title[:80])
             continue
         matched += 1
-        total_events += await _extract_and_store(db, text, company.id, article.url)
-        await compute_score(db, company.id, commit=False)
+        events, touched = await _extract_and_store(
+            db, text, None, article.url, route_per_event=True
+        )
+        total_events += events
+        for company_id in touched:
+            await compute_score(db, company_id, commit=False)
 
     if limiter_redis is not None:
         await limiter_redis.aclose()
@@ -289,7 +328,7 @@ async def _crawl_content(db: AsyncSession, source: Source) -> tuple[int, str, bo
         # A news site with no company attached: resolve per entry instead.
         return await _crawl_unattached(db, source, result)
 
-    events = await _extract_and_store(
+    events, _ = await _extract_and_store(
         db, result.content, source.company_id, source.url
     )
     _log(
@@ -304,7 +343,6 @@ async def _crawl_unattached(
     db: AsyncSession, source: Source, result: FetchResult
 ) -> tuple[int, str, bool]:
     """A news-site feed covering many companies."""
-    from app.companies.service import resolve_company
 
     events = 0
     matched = 0
@@ -317,14 +355,15 @@ async def _crawl_unattached(
         text = f"{entry.get('title', '')}\n{entry.get('body', '')}".strip()
         if not is_relevant(text, source.source_type):
             continue
-        company = await resolve_company(db, entry.get("title", "") or text[:400])
-        if company is None:
+        if not await find_companies_in_text(db, text):
             continue
         matched += 1
-        events += await _extract_and_store(
-            db, text, company.id, entry.get("link") or source.url
+        created, touched = await _extract_and_store(
+            db, text, None, entry.get("link") or source.url, route_per_event=True
         )
-        await compute_score(db, company.id, commit=False)
+        events += created
+        for company_id in touched:
+            await compute_score(db, company_id, commit=False)
 
     _log(
         db, source, "success", result=result, events=events,
