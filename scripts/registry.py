@@ -168,6 +168,57 @@ def _tidy(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip(" -–,")
 
 
+def company_name(name: str, section: str = "") -> str:
+    """The company a row is about, as distinct from what the row is titled.
+
+    Only the engineering-blog section needs this: everywhere else the Name
+    column already holds the company.
+    """
+    if section != "global_engineering_blogs":
+        return _tidy(name)
+    stripped = _tidy(_PUBLICATION_SUFFIX_RE.sub("", _PAREN_RE.sub("", name)))
+    # "Mozilla Hacks" reduces to "Mozilla"; a name that is *only* a suffix
+    # ("Blog") would reduce to nothing, so keep the original in that case.
+    return stripped or _tidy(name)
+
+
+def name_aliases(name: str, section: str = "") -> list[str]:
+    """Alternative names for entity resolution.
+
+    News writes "Eternal" where the registry says "Zomato (Eternal)", and
+    "PharmEasy" where it says "API Holdings (PharmEasy)". Without the alias the
+    article resolves to no company and the signal is lost.
+    """
+    aliases: list[str] = []
+
+    for inner in _PAREN_RE.findall(name):
+        for part in re.split(r"[,/]| and ", inner):
+            # "formerly Matrix Partners India" -> "Matrix Partners India"
+            part = re.sub(
+                r"^(formerly|now|aka|previously)\s+", "", part.strip(), flags=re.I
+            )
+            part = _tidy(part)
+            if part and not _QUALIFIER_RE.fullmatch(part):
+                aliases.append(part)
+
+    outer = _tidy(_PAREN_RE.sub("", name))
+    for part in re.split(r"\s*/\s*", outer):
+        part = _tidy(_QUALIFIER_RE.sub("", part))
+        aliases.append(part)
+        aliases.append(company_name(part, section))
+
+    canonical = company_name(name, section).lower()
+    seen: set[str] = {canonical}
+    return [
+        a
+        for a in aliases
+        if len(a) > 2
+        and a.lower() not in _GENERIC_NAMES
+        and any(c.isalpha() for c in a)
+        and not (a.lower() in seen or seen.add(a.lower()))
+    ]
+
+
 @dataclass(frozen=True)
 class Row:
     section: str
@@ -176,7 +227,11 @@ class Row:
 
     @property
     def name(self) -> str:
-        return _tidy(self.data.get("name", ""))
+        return company_name(self.data.get("name", ""), self.section)
+
+    @property
+    def aliases(self) -> list[str]:
+        return name_aliases(self.data.get("name", ""), self.section)
 
     @property
     def website(self) -> str:
