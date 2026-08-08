@@ -12,7 +12,8 @@ article written about them. Without prose matching those rows are inert.
 The cost of a wrong answer is asymmetric and the rules here reflect it. A miss
 loses one signal; a false match attaches someone else's funding round to a
 company and shows it as evidence on their page, which is the one thing the
-product promises never to do. No match at all is an acceptable answer.
+product promises never to do. So an ambiguous name has to clear a higher bar
+than a distinctive one, and no match at all is an acceptable answer.
 """
 
 from __future__ import annotations
@@ -32,6 +33,48 @@ logger = logging.getLogger(__name__)
 # Below this a name cannot be told from an initialism or a stray letter: "X"
 # and "Fi" match constantly and mean nothing.
 MIN_NAME_LENGTH = 3
+# At or below this, a name is short enough to collide with ordinary text by
+# chance, so it is held to the same rule as a name that is also a word. Ola,
+# OYO and MPL are real companies and dropping them outright would be worse.
+SHORT_NAME_LENGTH = 4
+
+# Company names that are also ordinary English. Matching these case-insensitively
+# anywhere in a sentence would tag every article that happens to use the word, so
+# they are held to the stricter rule below. The list is deliberately literal —
+# these are names actually present in the registry, not a general dictionary.
+AMBIGUOUS_NAMES = frozenset(
+    {
+        "cred", "digit", "element", "emergent", "glance", "hike", "linear",
+        "locus", "meta", "middleware", "notion", "open", "porter", "raise",
+        "ramp", "slice", "snap", "turing", "zeta", "zone",
+    }
+)
+
+# Words that make a sentence about a company rather than about a thing. An
+# ambiguous name only counts as a match when one of these is nearby.
+_CUE_RE = re.compile(
+    r"\b(?:"
+    r"raise[ds]?|raising|funding|funded|round|series\s+[a-e]|seed|valuation|"
+    r"investors?|invests?|invested|backed|acquir\w+|merger|ipo|"
+    r"startup|start-up|company|firm|platform|unicorn|founders?|"
+    r"co-founder|ceo|cto|cfo|coo|hir(?:ing|es|ed)|headcount|employees|"
+    r"engineers?|engineering|recruit\w*|onboard\w*|team|staff|"
+    r"announced|launches|launched|expands?|expansion|appoints?|appointed|"
+    # Leadership moves are a scored event type, and none of the words that
+    # signal one appear above.
+    r"exits?|departs?|departure|resign\w*|steps\s+down|joins?|joined|"
+    r"promoted|elevated|named|leaves|leaving|"
+    r"crore|lakh|million|billion"
+    # A currency amount is as strong a cue as any word, but it cannot sit
+    # inside the \b group: \b before "$" requires a word character before the
+    # symbol, so "raised $5M" would never match while "US$5M" would.
+    r")\b|[$₹]\s?\d",
+    re.IGNORECASE,
+)
+# How far from the name a cue may sit and still be talking about it. One long
+# sentence, roughly.
+_CUE_WINDOW = 120
+
 # Rebuilt at most this often. A crawl task lives well under this, so the index
 # is built once per task and a company added mid-run is picked up on the next.
 _CACHE_TTL_SECONDS = 300
@@ -44,6 +87,7 @@ class _Entry:
     company_id: object
     company_name: str
     spelling: str
+    distinctive: bool
 
 
 @dataclass(frozen=True)
@@ -55,18 +99,20 @@ class Mention:
     matched: str
     count: int
     first_position: int
+    distinctive: bool
 
     @property
     def rank(self) -> tuple:
         """Sort key, best first.
 
-        Whichever name is mentioned more often wins, since the subject of an
-        article is repeated and the companies named in passing are not; then
-        whichever is named earliest. Position decides "Zomato acquires Blinkit"
-        in favour of the acquirer, which is the company the expansion signal
-        belongs to.
+        A distinctive name outranks an ambiguous one; then whichever is
+        mentioned more often, since the subject of an article is repeated and
+        the companies named in passing are not; then whichever is named
+        earliest. Position decides "Zomato acquires Blinkit" in favour of the
+        acquirer, which is the company the expansion signal belongs to.
         """
         return (
+            not self.distinctive,
             -self.count,
             self.first_position,
             -len(self.matched),
@@ -101,12 +147,17 @@ class CompanyIndex:
         existing = self._entries.get(key)
         # A name claimed by two companies identifies neither.
         if existing is not None and existing.company_id != company.id:
-            self._entries[key] = _Entry(None, "", spelling)
+            self._entries[key] = _Entry(None, "", spelling, False)
             return
         self._entries[key] = _Entry(
             company_id=company.id,
             company_name=company.name,
             spelling=spelling,
+            # Only single tokens are ever listed as ambiguous, so a multi-word
+            # name is distinctive unless it is very short.
+            distinctive=(
+                key not in AMBIGUOUS_NAMES and len(key) > SHORT_NAME_LENGTH
+            ),
         )
 
     def __len__(self) -> int:
@@ -122,6 +173,10 @@ class CompanyIndex:
             entry = self._entries[match.group(1).lower()]
             if entry.company_id is None:
                 continue
+            if not entry.distinctive and not self._is_ambiguous_match(
+                text, match, entry.spelling
+            ):
+                continue
             # Keyed by company, so a name and its alias in one article count as
             # one company mentioned twice rather than two companies.
             seen = found.setdefault(
@@ -132,11 +187,29 @@ class CompanyIndex:
                     "matched": match.group(1),
                     "count": 0,
                     "first_position": match.start(),
+                    "distinctive": entry.distinctive,
                 },
             )
             seen["count"] += 1
 
         return sorted((Mention(**s) for s in found.values()), key=lambda m: m.rank)
+
+    @staticmethod
+    def _is_ambiguous_match(text: str, match: re.Match[str], canonical: str) -> bool:
+        """Whether a name that is also an ordinary word is being used as a name.
+
+        Two things have to hold. The spelling must match the company's own
+        casing, which rules out "open source" for Open and "linear regression"
+        for Linear while still accepting "Open raised". And a corporate cue must
+        sit nearby, because capitalisation alone is worth little at the start of
+        a sentence.
+        """
+        if match.group(1) != canonical:
+            return False
+        window = text[
+            max(0, match.start() - _CUE_WINDOW) : match.end() + _CUE_WINDOW
+        ]
+        return _CUE_RE.search(window) is not None
 
 
 _cache: tuple[float, CompanyIndex] | None = None
