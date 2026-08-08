@@ -5,9 +5,15 @@ decide what gets seeded: what counts as a URL, which name a row is really
 about, and which section a row belongs to.
 """
 
+from pathlib import Path
+
 import pytest
 
 from scripts import registry
+
+REGISTRY = (
+    Path(__file__).resolve().parent.parent / "hiring_intelligence_source_registry.md"
+)
 
 
 @pytest.mark.parametrize(
@@ -115,3 +121,53 @@ def test_colliding_headers_stay_addressable() -> None:
     """
     mapped = registry._map_headers(["GitHub Org", "Parent Company", "GitHub URL"])
     assert mapped == ["_github_organization", "name", "github_organization"]
+
+
+# --- against the real file ---------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def rows() -> list[registry.Row]:
+    return registry.parse(REGISTRY)
+
+
+def test_every_section_is_classified(rows: list[registry.Row]) -> None:
+    known = (
+        registry.COMPANY_SECTIONS
+        | registry.NEWS_SECTIONS
+        | registry.ENRICHMENT_SECTIONS
+    )
+    assert {row.section for row in rows} <= known
+
+
+def test_registry_yields_companies_and_sources(rows: list[registry.Row]) -> None:
+    assert len(rows) > 400
+    companies = [r for r in rows if r.is_company]
+    assert len(companies) > 250
+    # The registry's value is that most rows have no career page — those
+    # companies are tracked through what is written about them. If this ever
+    # inverts, the parser is picking up something it shouldn't.
+    without_careers = [r for r in companies if not r.url("career_page")]
+    assert len(without_careers) > len(companies) / 3
+
+
+def test_no_annotated_cell_becomes_a_source(rows: list[registry.Row]) -> None:
+    for row in rows:
+        for column in ("career_page", "company_blog", "engineering_blog", "rss_feed"):
+            url = row.url(column)
+            assert " " not in url, f"{row.section}:{row.lineno} {column}={url!r}"
+
+
+def test_frequency_and_priority_are_read(rows: list[registry.Row]) -> None:
+    assert any(r.frequency_minutes == 1440 for r in rows)
+    assert any(r.reliability == 0.9 for r in rows)
+
+
+def test_old_registry_format_still_parses() -> None:
+    """The previous registry must keep working — it is still committed."""
+    old = REGISTRY.parent / "source-registry.md"
+    if not old.exists():  # pragma: no cover - file may be retired later
+        pytest.skip("old registry removed")
+    parsed = registry.parse(old)
+    assert parsed
+    assert any(r.url("rss_feed").startswith("https://") for r in parsed)
