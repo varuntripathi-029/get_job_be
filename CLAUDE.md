@@ -21,7 +21,7 @@ uv sync                                    # install
 docker compose up -d                       # postgres + redis
 uv run alembic upgrade head                # migrate
 uv run uvicorn app.main:app --reload       # API on :8000
-uv run python -m scripts.seed              # seed from source-registry.md
+uv run python -m scripts.seed --validate   # seed from the registry, probing ATS boards
 
 uv run pytest                              # tests
 uv run ruff check app/ workers/ tests/     # lint
@@ -79,7 +79,30 @@ Implemented: config, database, all 9 models, initial migration, Google OAuth, co
 
 Implemented on top of that: search, public dashboard, company comparison, pagination, error contract, in-process rate limiting, extended health check, OpenAPI metadata. 41 endpoints.
 
-Not yet implemented: **fetchers, crawler rate limiter, pre-filter, event extraction, dedup, scoring engine, ATS job sync, seed script.** Nothing writes to `events`, `jobs` or `company_scores`, so those tables are empty. Every read endpoint is wired and returns a correct empty result — but the whole product surface stays blank until the pipeline lands. This is the single largest gap.
+Also implemented: the whole crawl pipeline — fetchers, crawler rate limiter, pre-filter, LLM classify/extract, dedup, scoring engine, ATS job sync, and the seed script.
+
+## Seeding
+
+`hiring_intelligence_source_registry.md` is the seed input; `source-registry.md` is its predecessor and still parses. Parsing lives in `scripts/registry.py`, separate from `scripts/seed.py` so the rules are testable without a database.
+
+Three things the parser exists to get right, each of which silently corrupts the seed otherwise:
+
+- **URLs have no scheme** in the current registry (`bytes.swiggy.com/feed`), and cells carry inline caveats (`sebi.gov.in (no confirmed public RSS — verify before use)`). A cell counts as a URL only if it is *entirely* a URL, so an annotated cell seeds nothing rather than a source that 404s forever.
+- **The Website column is not always the company's site.** `global_engineering_blogs` lists the blog there, and several live on Medium — Airbnb and Pinterest both reduce to `medium.com`, which is a unique column, so the second would be merged into the first. `_company_domain` rejects shared hosts and falls through to the next column.
+- **Publications never become companies.** VC, accelerator and news rows have websites and careers pages of their own, but seeding them would put Blume Ventures on the dashboard with a hiring score. What they publish is kept, attached to no company.
+
+Run `--validate` for real work: it probes each candidate ATS board and seeds the ones that fail as `pending`. The registry names a vendor but never a board token, and the token is only usually the company name — 26 of 55 guesses were wrong on the current file.
+
+## Entity resolution
+
+Two functions, and picking the wrong one produces silence rather than an error:
+
+- `companies.service.resolve_company` takes a clean name or domain and matches exactly. Right for user input and API lookups.
+- `companies.matcher` takes prose and finds the company inside it. Right for crawling. It was worth building because most registry rows have no career page at all: an article written about a company is the only way it is ever observed, so without prose matching those rows are inert.
+
+The matcher is deliberately asymmetric. Missing a mention costs one signal; a false match publishes someone else's funding round as evidence on a company's page, which is the one thing the product promises not to do. So a name that is also an ordinary word ("Open", "Linear", "Meta"), or one of four characters or fewer ("Ola", "OYO"), must match the company's own casing *and* sit within 120 characters of a corporate cue. A name two companies share identifies neither.
+
+**Attribution happens per event, not per document.** A company blog is about one company, but a news feed is not — one Entrackr piece lists eight departures across three firms. `_extract_and_store(..., route_per_event=True)` files each extracted event against the company its own **title** names, via `resolve_event_subject`; the evidence excerpt supplies surrounding words for the cue test but can never itself produce the match. Without that split, "SkyAI recruiting Python developers" was filed against LinkedIn because the excerpt said where the post appeared, and a roundup of Peak XV departures was filed against Pine Labs. An event naming nobody tracked is dropped rather than inheriting the article's company.
 
 ## Database
 
