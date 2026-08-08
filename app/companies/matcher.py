@@ -248,3 +248,26 @@ async def resolve_company_in_text(db: AsyncSession, text: str) -> Company | None
     if not mentions:
         return None
     return await db.get(Company, mentions[0].company_id)
+
+
+async def resolve_event_subject(
+    db: AsyncSession, title: str, context: str = ""
+) -> Company | None:
+    """The company an extracted event is about.
+
+    Only a name in `title` can be the subject. The title is the extractor's own
+    one-line statement of what happened, so whoever it names is who it happened
+    to; `context` is read for the surrounding words but never for a match.
+    Without that split, "SkyAI recruiting Python developers" — SkyAI is not
+    tracked — resolves to LinkedIn because the evidence excerpt mentions where
+    the post appeared.
+
+    The cost is real: an event titled "Opens a Bengaluru office" names nobody
+    and is dropped. That is the trade this module is built to make.
+    """
+    boundary = len(title)
+    mentions = await find_companies_in_text(db, f"{title}\n{context}")
+    subject = [m for m in mentions if m.first_position < boundary]
+    if not subject:
+        return None
+    return await db.get(Company, subject[0].company_id)
