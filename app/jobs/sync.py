@@ -249,10 +249,33 @@ async def sync_company_jobs(
     fetcher = fetcher or ATSFetcher()
     postings = await fetcher.fetch_jobs(source.url)
 
-    result = SyncResult()
     if not postings:
         logger.info("no postings returned for %s (%s)", company.slug, source.url)
-        return result
+        return SyncResult()
+
+    # An ATS API returns every open posting in one response, so anything absent
+    # really is closed. That is not true of the scraped path — see allow_close.
+    return await reconcile_jobs(db, company, source, postings)
+
+
+async def reconcile_jobs(
+    db: AsyncSession,
+    company: Company,
+    source: Source,
+    postings: list[dict],
+    *,
+    allow_close: bool = True,
+) -> SyncResult:
+    """Diff a set of normalised postings against what is stored.
+
+    `allow_close` exists because the close pass is only safe when the input is
+    authoritative. An ATS API either returns the whole board or errors, so a
+    missing posting means a closed role. A scraped careers page can return a
+    partial list for a dozen boring reasons — a slow render, a layout change, a
+    truncated LLM response — and closing on that would retract dozens of live
+    roles from one bad parse.
+    """
+    result = SyncResult()
 
     # Keep the last occurrence if a board somehow repeats an id.
     incoming = {
@@ -261,11 +284,16 @@ async def sync_company_jobs(
         if p.get("external_id") and p.get("title")
     }
 
+    # Scoped to the source, not just the company. A company can have both an
+    # ATS board and a scraped careers page, and they must never diff against
+    # each other's rows — the scrape would see every ATS job as "missing".
     existing_rows = list(
         (
             await db.execute(
                 select(Job).where(
-                    Job.company_id == company.id, Job.external_id.is_not(None)
+                    Job.company_id == company.id,
+                    Job.source_id == source.id,
+                    Job.external_id.is_not(None),
                 )
             )
         )
@@ -309,12 +337,20 @@ async def sync_company_jobs(
         else:
             result.unchanged += 1
 
-    for external_id in existing_ids - incoming_ids:
-        job = existing[external_id]
-        if job.is_active:
-            job.is_active = False
-            job.closed_at = now
-            result.closed += 1
+    if allow_close:
+        for external_id in existing_ids - incoming_ids:
+            job = existing[external_id]
+            if job.is_active:
+                job.is_active = False
+                job.closed_at = now
+                result.closed += 1
+    elif existing_ids - incoming_ids:
+        logger.info(
+            "%s: %d stored jobs absent from this scrape, left open "
+            "(close pass disabled for non-authoritative sources)",
+            company.slug,
+            len(existing_ids - incoming_ids),
+        )
 
     logger.info(
         "%s: %d new, %d updated, %d closed, %d unchanged",
