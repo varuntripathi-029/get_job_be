@@ -37,6 +37,11 @@ WORKDIR /app
 
 COPY --from=builder --chown=hiresignal:hiresignal /app /app
 
+# Set explicitly rather than relying on the host's file mode: a checkout on
+# Windows carries no execute bit, and the container would start with
+# "permission denied" on the entrypoint.
+RUN chmod +x /app/docker-entrypoint.sh
+
 USER hiresignal
 
 # Render, Fly and Cloud Run all assign the port at runtime via $PORT; 8000 is
@@ -49,7 +54,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -fsS "http://localhost:${PORT}/health" || exit 1
 
-# exec so uvicorn becomes PID 1 and receives SIGTERM directly. Without it the
-# shell holds PID 1, swallows the signal, and the platform's graceful-shutdown
-# window expires into a SIGKILL mid-request.
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["/app/docker-entrypoint.sh"]
