@@ -21,6 +21,7 @@ from app.companies.models import Company
 from app.config import settings
 from app.crawler.fetchers.base import FetchResult
 from app.crawler.fetchers.browser import PlaywrightFetcher
+from app.crawler.fetchers.html_text import html_to_linked_text
 from app.crawler.fetchers.news_api import NewsAPIFetcher, NewsArticle, QuotaTracker
 from app.crawler.fetchers.rss import RSSFetcher
 from app.crawler.fetchers.static import StaticFetcher
@@ -30,10 +31,13 @@ from app.crawler.rate_limiter import build_rate_limiter
 from app.crawler.ssrf import HostResolutionError, validate_url
 from app.extraction.dedup import deduplicate_event
 from app.extraction.prompts import extract_v1
+from app.extraction.schemas import ExtractedEvent
 from app.extraction.service import classify_content, extract_events
-from app.jobs.sync import sync_company_jobs
+from app.jobs.careers import extract_career_page_jobs
+from app.jobs.sync import reconcile_jobs, sync_company_jobs
 from app.scoring.engine import compute_score
 from app.sources.models import Source
+from app.sources.service import discover_ats_board, register_discovered_board
 from workers.base import run_async, with_session
 from workers.celery_app import celery_app
 
@@ -186,8 +190,6 @@ async def _crawl_ats(db: AsyncSession, source: Source) -> tuple[int, str]:
     # New postings are themselves a hiring signal, and this is the one place we
     # can count them exactly rather than inferring from prose.
     if result.new > 0:
-        from app.extraction.schemas import ExtractedEvent
-
         _, is_new = await deduplicate_event(
             db,
             ExtractedEvent(
@@ -296,6 +298,55 @@ _FETCHERS = {
 }
 
 
+async def _discover_board(
+    db: AsyncSession, source: Source, result: FetchResult
+) -> str | None:
+    """Register an ATS board referenced by this page, if there is one.
+
+    Most companies publish a careers page that is a wrapper around a hosted
+    board, so the page itself has nothing to extract while a fully structured
+    feed sits one iframe away. Finding it converts a fragile HTML scrape into
+    the reliable ats_api path, with real per-role apply links.
+
+    Returns a summary line when a board was newly registered, else None.
+    """
+    if source.company_id is None or source.fetch_tier == "ats_api":
+        return None
+    if not result.raw_html:
+        return None
+
+    board_url = discover_ats_board(result.raw_html)
+    if board_url is None:
+        return None
+
+    try:
+        created = await register_discovered_board(db, source.company_id, board_url)
+    except SSRFError as exc:
+        logger.warning("discovered board %s rejected: %s", board_url, exc)
+        return None
+
+    if created is None:
+        return None
+    return f"discovered ATS board {board_url}"
+
+
+def _feed_entries(result: FetchResult, source: Source) -> list[dict]:
+    """Split a fetched payload into the entries the extractor should see.
+
+    The RSS fetcher emits a JSON list of {title, link, published_at, body}
+    precisely so one post is extracted at a time. Static HTTP and Playwright
+    emit a single document, which becomes a one-entry list carrying the
+    source's own URL.
+    """
+    try:
+        entries = json.loads(result.content)
+    except json.JSONDecodeError:
+        entries = None
+    if not isinstance(entries, list):
+        return [{"title": "", "body": result.content, "link": source.url}]
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
 async def _crawl_content(db: AsyncSession, source: Source) -> tuple[int, str, bool]:
     """RSS, static HTTP and Playwright all share this path."""
     # Validated again at crawl time, not just at submission: DNS can be
@@ -320,23 +371,109 @@ async def _crawl_content(db: AsyncSession, source: Source) -> tuple[int, str, bo
 
     source.content_hash = result.content_hash
 
+    # Ahead of the pre-filter deliberately. A careers page whose visible text
+    # is "there are no openings currently" gets rejected as irrelevant, yet it
+    # still names the board it embeds — and that board is the whole prize.
+    board = await _discover_board(db, source, result)
+
     if not is_relevant(result.content, source.source_type):
         _log(db, source, "success", result=result, text=result.content, changed=True)
-        return 0, "pre-filter rejected", True
+        return 0, board or "pre-filter rejected", True
 
     if source.company_id is None:
         # A news site with no company attached: resolve per entry instead.
         return await _crawl_unattached(db, source, result)
 
-    events, _ = await _extract_and_store(
-        db, result.content, source.company_id, source.url
-    )
+    # A careers page yields job rows, not prose signals. Skipped once a board
+    # has been discovered for this company — the ATS feed is strictly better
+    # data, and paying an LLM to re-read the wrapper around it is waste.
+    if source.source_type == "career_page" and result.raw_html:
+        return await _crawl_career_page(db, source, result)
+
+    # Per entry, not over the whole payload. A feed carries up to 25 posts and
+    # only the entry knows its own article URL — attributing the batch to
+    # source.url filed every event's evidence against the feed itself, so
+    # "view source" opened raw XML instead of the post.
+    events = 0
+    for entry in _feed_entries(result, source):
+        text = f"{entry.get('title', '')}\n{entry.get('body', '')}".strip()
+        if not text:
+            continue
+        # The rule-based pre-filter again per entry: without it, splitting one
+        # LLM call into 25 would multiply extraction cost by the feed length.
+        if not is_relevant(text, source.source_type):
+            continue
+        created, _ = await _extract_and_store(
+            db, text, source.company_id, entry.get("link") or source.url
+        )
+        events += created
+
     _log(
         db, source, "success", result=result, events=events,
         text=result.content, changed=True,
     )
     await compute_score(db, source.company_id, commit=False)
     return events, f"{events} new events", True
+
+
+async def _crawl_career_page(
+    db: AsyncSession, source: Source, result: FetchResult
+) -> tuple[int, str, bool]:
+    """Read open roles off a company's own careers page."""
+    company = await db.get(Company, source.company_id)
+    if company is None:
+        raise ValueError("career page source has no company attached")
+
+    # If this company already has a working ATS board, that feed supersedes
+    # anything scraped here — same roles, better fields, no LLM cost.
+    board = await db.scalar(
+        select(Source).where(
+            Source.company_id == company.id,
+            Source.fetch_tier == "ats_api",
+            Source.status == "approved",
+        )
+    )
+    if board is not None:
+        _log(db, source, "success", result=result, text=result.content, changed=True)
+        return 0, f"skipped, ATS board already tracked ({board.url})", True
+
+    linked = html_to_linked_text(result.raw_html or "", source.url)
+    postings = await extract_career_page_jobs(linked, source.url)
+
+    # None means the extractor failed, which is not the same as "no roles".
+    # Reconciling on it would write nothing and — with the close pass off —
+    # merely waste a crawl, but the distinction is worth keeping explicit.
+    if postings is None:
+        _log(db, source, "success", result=result, text=result.content, changed=True)
+        return 0, "extractor unavailable, nothing written", True
+
+    sync = await reconcile_jobs(
+        db, company, source, postings, allow_close=False
+    )
+
+    events = 0
+    if sync.new > 0:
+        _, is_new = await deduplicate_event(
+            db,
+            ExtractedEvent(
+                event_type="career_page_update",
+                title=f"{company.name} listed {sync.new} new roles",
+                event_occurred_at=datetime.now(UTC),
+                structured_data={"new_postings": sync.new},
+                evidence_excerpt=f"{sync.new} new roles on {source.url}",
+                confidence=0.8,
+            ),
+            company.id,
+            source.url,
+        )
+        events = int(is_new)
+
+    _log(
+        db, source, "success", result=result, events=events,
+        text=result.content, changed=True,
+    )
+    await compute_score(db, company.id, commit=False)
+    return events, f"{sync.new} new, {sync.updated} updated roles", True
 
 
 async def _crawl_unattached(
@@ -346,12 +483,7 @@ async def _crawl_unattached(
 
     events = 0
     matched = 0
-    try:
-        entries = json.loads(result.content)
-    except json.JSONDecodeError:
-        entries = [{"title": "", "body": result.content, "link": source.url}]
-
-    for entry in entries if isinstance(entries, list) else []:
+    for entry in _feed_entries(result, source):
         text = f"{entry.get('title', '')}\n{entry.get('body', '')}".strip()
         if not is_relevant(text, source.source_type):
             continue
