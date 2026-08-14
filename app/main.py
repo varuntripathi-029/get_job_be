@@ -20,6 +20,7 @@ from app.extraction.router import router as events_router
 from app.jobs.router import router as jobs_router
 from app.newsletter.router import router as newsletter_router
 from app.resumes.router import router as resumes_router
+from app.scheduler.router import router as scheduler_router
 from app.scoring.router import router as scoring_router
 from app.search.router import router as search_router
 from app.sources.router import router as sources_router
@@ -77,6 +78,14 @@ TAGS_METADATA = [
     {"name": "newsletter", "description": "Double opt-in weekly digest."},
     {"name": "sources", "description": "What is tracked, and submitting new sources."},
     {"name": "admin", "description": "Admin-only moderation and operations."},
+    {
+        "name": "scheduler",
+        "description": (
+            "Cron-triggered jobs, for deployments with no Celery Beat process. "
+            "Authenticated with the SCHEDULER_TOKEN shared secret, not a user "
+            "session."
+        ),
+    },
 ]
 
 
@@ -200,6 +209,7 @@ def create_app() -> FastAPI:
         newsletter_router,
         scoring_router,
         admin_router,
+        scheduler_router,
     ):
         app.include_router(router)
 

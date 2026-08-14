@@ -50,6 +50,16 @@ class Settings(BaseSettings):
     jwt_access_token_expire_minutes: int = 30
     jwt_refresh_token_expire_days: int = 7
 
+    # HTTP scheduler — lets an external cron drive the jobs Celery Beat would,
+    # so a host that offers exactly one process can still run the pipeline.
+    # Empty disables the endpoints outright rather than leaving them open;
+    # a deployment that forgets to set this gets 503, not an open trigger.
+    scheduler_token: str = ""
+    # Kept well under a typical proxy's request timeout. Work is leased before
+    # it starts, so anything not reached in this window is picked up by the
+    # next tick rather than lost.
+    scheduler_deadline_seconds: float = 50.0
+
     # LLM — provider is chosen per role so the cheap classifier and the
     # expensive extractor can sit on different vendors.
     gemini_api_key: str = ""
@@ -165,7 +175,11 @@ class Settings(BaseSettings):
     playwright_timeout_seconds: int = 60
     rate_limit_seconds_per_domain: float = 5.0
     crawl_log_retention_days: int = 10
-    scheduler_batch_size: int = 10
+    # Sources crawled per HTTP scheduler tick. Small on purpose: each one may
+    # involve a browser launch and an LLM call, and a bounded batch is what
+    # keeps the request inside scheduler_deadline_seconds. Was previously
+    # declared and never read; now it does the job its name implies.
+    scheduler_batch_size: int = 3
 
     @field_validator("cors_origins", mode="before")
     @classmethod
