@@ -16,7 +16,7 @@ import json
 import logging
 import time
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
@@ -113,6 +113,34 @@ class QuotaTracker:
         except Exception as exc:  # noqa: BLE001
             logger.warning("quota write failed for %s: %s", api, exc)
 
+    @staticmethod
+    def resets_at() -> datetime:
+        """When the daily buckets roll over.
+
+        `_key` is stamped with the UTC date, so every counter resets together
+        at UTC midnight rather than on a per-key sliding window.
+        """
+        now = datetime.now(UTC)
+        return (now + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+
+    async def status(self) -> list[dict[str, object]]:
+        """Per-vendor usage, for showing users why crawling has paused."""
+        rows = []
+        for api, limit in DAILY_LIMITS.items():
+            used = await self.used(api)
+            rows.append(
+                {
+                    "api": api,
+                    "used": used,
+                    "limit": limit,
+                    "remaining": max(0, limit - used),
+                    "exhausted": used >= limit,
+                }
+            )
+        return rows
+
 
 class NewsAPIFetcher(BaseFetcher):
     def __init__(self, quota: QuotaTracker | None = None, companies=None):
@@ -167,6 +195,13 @@ class NewsAPIFetcher(BaseFetcher):
             if settings.gnews_api_key and await self.quota.allowed("gnews"):
                 articles += await self._gnews(client, query)
                 await self.quota.record("gnews")
+            # Job listings before news. On the free tier this budget is tiny
+            # (see DAILY_LIMITS), and an open role is a harder hiring signal
+            # than an article speculating about one, so it gets first call on
+            # whatever is left.
+            if settings.serpapi_key and await self.quota.allowed("serpapi"):
+                articles += await self._serpapi_jobs(client, company_name)
+                await self.quota.record("serpapi")
             if settings.serpapi_key and await self.quota.allowed("serpapi"):
                 articles += await self._serpapi(client, company_name)
                 await self.quota.record("serpapi")
@@ -233,6 +268,66 @@ class NewsAPIFetcher(BaseFetcher):
             )
             for a in response.json().get("articles", [])
         ]
+
+    async def _serpapi_jobs(
+        self, client: httpx.AsyncClient, company_name: str
+    ) -> list[NewsArticle]:
+        """Google Jobs listings for a company.
+
+        The coverage path for companies with neither a hosted ATS board nor a
+        parseable careers page — which, measured on a sample of six real
+        careers pages, is most of them. Google already aggregates postings from
+        the boards those companies do use, so one query reaches sites we cannot
+        crawl directly and must not scrape.
+
+        Returned as NewsArticles because that is what this fetcher emits; the
+        crawl path routes them through the same extractor as any other signal.
+        """
+        try:
+            response = await client.get(
+                "https://serpapi.com/search",
+                params={
+                    "engine": "google_jobs",
+                    "q": f"{company_name} jobs",
+                    "hl": "en",
+                    "api_key": settings.serpapi_key,
+                },
+                headers=default_headers(),
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.warning("serpapi google_jobs request failed: %s", exc)
+            return []
+
+        results = response.json().get("jobs_results") or []
+        articles = []
+        for r in results[:ARTICLES_PER_COMPANY]:
+            title = r.get("title") or ""
+            if not title:
+                continue
+            # apply_options carries the real board link; share_link is a Google
+            # redirect that expires.
+            apply_options = r.get("apply_options") or []
+            url = ""
+            if apply_options and isinstance(apply_options[0], dict):
+                url = apply_options[0].get("link") or ""
+            url = url or r.get("share_link") or ""
+            if not url:
+                continue
+            articles.append(
+                NewsArticle(
+                    title=f"{r.get('company_name') or company_name} is hiring: {title}",
+                    description=(r.get("location") or ""),
+                    content=(r.get("description") or "")[:2000],
+                    url=url,
+                    published_at=None,
+                    source_name=r.get("via") or "google_jobs",
+                )
+            )
+        logger.info(
+            "google_jobs returned %d listings for %s", len(articles), company_name
+        )
+        return articles
 
     async def _serpapi(
         self, client: httpx.AsyncClient, company_name: str
