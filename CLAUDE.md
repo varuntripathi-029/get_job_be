@@ -160,6 +160,31 @@ Double opt-in. Subscribe → confirmation email → `is_active=true` only after 
 
 Sending goes through httpx rather than the `resend` package, which is synchronous and would block the event loop. Free tier is 100/day at 2 req/s; the sender paces at 1/s and defers the remainder to the next run when the cap is hit.
 
+## Deployment
+
+Render free tier, one web service, no worker. `render.yaml` is the blueprint;
+Postgres and Redis stay on Neon and Upstash so nothing is tied to the host.
+
+**Celery Beat has no home on a one-process host**, so the schedule is driven
+from outside: `.github/workflows/scheduler.yml` cron-calls `/scheduler/*`, and
+every job Beat ran has an endpoint. Two things make that safe — `_tick` leases
+each due source before returning it, so a request dying mid-batch loses
+nothing, and every run is bounded by `SCHEDULER_BATCH_SIZE` and
+`SCHEDULER_DEADLINE_SECONDS` to stay inside the proxy timeout. Whatever does
+not fit is the next tick's work.
+
+`SCHEDULER_TOKEN` gates those endpoints and must match the GitHub repo secret.
+Unset means **disabled** (503), never unauthenticated — they spend LLM and
+third-party quota, so an open trigger is a bill.
+
+The Celery tasks are unchanged. Beat is still the better trigger where a worker
+exists: it parallelises and retries, which the HTTP path deliberately does not.
+
+`PLAYWRIGHT_MAX_CONCURRENT=0` disables the browser tier. Chromium does not fit
+in 512MB beside the app, and an OOM kill takes the whole service down — a
+`requires_js` source failing alone is the better outcome. Consequence: on
+Render, JS-rendered career pages cannot be crawled at all.
+
 ## Gotchas
 
 - `app/models.py` must import every model. Alembic autogenerate silently produces an empty migration for anything not imported there.
