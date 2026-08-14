@@ -39,6 +39,40 @@ def html_to_text(html: str) -> str:
     return extracted
 
 
+def html_to_linked_text(html: str, base_url: str, *, limit: int = 400) -> str:
+    """Readable text with anchors kept as `[label](url)`.
+
+    The plain `html_to_text` path ends at `get_text()`, which drops every href.
+    That is right for prose, where a link is noise, and wrong for a careers
+    page, where the link *is* the content — without it an extracted role has
+    nowhere to apply.
+
+    Readability is skipped here: it isolates the article and discards
+    navigation, and a job listing page is a list of links, which is exactly the
+    shape it strips.
+    """
+    from urllib.parse import urljoin
+
+    soup = BeautifulSoup(html, "lxml")
+    for tag in soup(_STRIP_TAGS):
+        tag.decompose()
+
+    # Rewrite in place so anchors keep their position in the surrounding text;
+    # a role's location usually sits in the same row as its link.
+    for anchor in soup.find_all("a", href=True)[:limit]:
+        label = " ".join(anchor.get_text(" ", strip=True).split())
+        if not label:
+            continue
+        href = urljoin(base_url, anchor["href"])
+        if href.lower().startswith(("javascript:", "mailto:", "#")):
+            continue
+        anchor.replace_with(f"[{label}]({href})")
+
+    text = soup.get_text(separator="\n", strip=True)
+    lines = [line for line in (ln.strip() for ln in text.split("\n")) if line]
+    return "\n".join(lines)
+
+
 def _soup_text(markup: str) -> str:
     soup = BeautifulSoup(markup, "lxml")
     for tag in soup(_STRIP_TAGS):
