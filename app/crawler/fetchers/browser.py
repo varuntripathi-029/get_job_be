@@ -25,12 +25,26 @@ from app.crawler.fetchers.html_text import html_to_text
 logger = logging.getLogger(__name__)
 
 # Module-level so the cap is shared by every fetcher instance in the process.
-_semaphore = asyncio.Semaphore(settings.playwright_max_concurrent)
+# max(1, ...) because Semaphore(0) can never be acquired: a zero setting would
+# park every browser fetch forever instead of failing, holding the request
+# open until something else timed out. Zero means disabled, handled below.
+_semaphore = asyncio.Semaphore(max(1, settings.playwright_max_concurrent))
 
 
 class PlaywrightFetcher(BaseFetcher):
     async def fetch(self, url: str) -> FetchResult:
         started = time.monotonic()
+
+        # A deliberate off switch for hosts that cannot afford a browser. On a
+        # 512MB instance Chromium does not fit beside the app, and an OOM kill
+        # takes down the whole service — one dead source is the better failure.
+        if settings.playwright_max_concurrent < 1:
+            return failure(
+                "Browser tier is disabled here (PLAYWRIGHT_MAX_CONCURRENT=0). "
+                "This source needs JavaScript rendering and cannot be crawled "
+                "on this deployment."
+            )
+
         try:
             from playwright.async_api import async_playwright
         except ImportError:
