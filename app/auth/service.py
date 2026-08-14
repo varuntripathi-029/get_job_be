@@ -91,12 +91,19 @@ async def get_or_create_user(
                 "bootstrapping_first_admin email=%s — no admin existed yet", email
             )
 
+        # is_active is set explicitly even though the column has
+        # server_default='true'. A server default is only applied by the INSERT
+        # itself, so until this row is flushed the attribute reads None — and
+        # the deactivation guard below runs before the commit, so leaving it
+        # unset rejected every brand-new account as deactivated and rolled the
+        # row back, making sign-up impossible.
         user = User(
             email=email,
             name=name,
             google_id=google_id,
             avatar_url=avatar_url,
             role=role,
+            is_active=True,
         )
         db.add(user)
         created = True
