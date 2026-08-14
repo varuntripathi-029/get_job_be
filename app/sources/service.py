@@ -112,6 +112,14 @@ _ATS_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     ),
 ]
 
+# Only these have a response parser in app/crawler/fetchers/ats.py. The
+# patterns above recognise more vendors than that, and a board routed to
+# ats_api without a parser fetches successfully, fails _normalise, and returns
+# zero jobs on every crawl forever — a source that looks healthy and produces
+# nothing. Anything unparsed is better off on the career-page path, which at
+# least reads titles out of the rendered HTML.
+PARSEABLE_ATS_PROVIDERS = frozenset({"greenhouse", "lever", "ashby"})
+
 # Internal identifiers, not real URLs — these never hit SSRF validation.
 _PSEUDO_SCHEMES = ("newsapi://", "gnews://", "serpapi://")
 
@@ -136,6 +144,50 @@ def detect_ats_provider(url: str) -> tuple[str, str] | None:
     return None
 
 
+# Board references as they appear inside a careers page: an iframe src, a
+# script tag, an anchor, or a URL embedded in inline JSON. Matched against raw
+# markup, so the scheme and quoting around them vary.
+_ATS_IN_PAGE = re.compile(
+    r"(?:https?://)?("
+    r"(?:job-boards|boards)\.greenhouse\.io/[A-Za-z0-9_-]+"
+    r"|jobs\.lever\.co/[A-Za-z0-9_-]+"
+    r"|jobs\.ashbyhq\.com/[A-Za-z0-9_-]+"
+    r")",
+    re.I,
+)
+
+# Greenhouse and Ashby both serve non-board paths off the same host; a token
+# that is really a route would produce a board that 404s on every crawl.
+_NOT_A_TOKEN = frozenset(
+    {"embed", "jobs", "job", "boards", "api", "v1", "static", "assets", "search"}
+)
+
+
+def discover_ats_board(html: str) -> str | None:
+    """Find a real ATS board referenced by a careers page.
+
+    Companies routinely publish `acme.com/careers` as a wrapper that embeds a
+    Greenhouse or Lever board, so the page itself lists nothing extractable
+    while a fully structured feed sits one iframe away. Returns the board URL
+    to register as an `ats_api` source, or None.
+
+    Only parseable providers are returned — see PARSEABLE_ATS_PROVIDERS.
+    """
+    if not html:
+        return None
+
+    for match in _ATS_IN_PAGE.finditer(html):
+        candidate = match.group(1)
+        token = candidate.rstrip("/").rsplit("/", 1)[-1].lower()
+        if token in _NOT_A_TOKEN:
+            continue
+        detected = detect_ats_provider(candidate)
+        if detected is None or detected[0] not in PARSEABLE_ATS_PROVIDERS:
+            continue
+        return f"https://{candidate.lstrip('/')}"
+    return None
+
+
 def detect_fetch_tier(url: str, source_type: str | None = None) -> str:
     """Best-guess fetch tier. Always overridable by an admin."""
     lowered = url.lower()
@@ -144,7 +196,8 @@ def detect_fetch_tier(url: str, source_type: str | None = None) -> str:
         return "news_api"
     if lowered.startswith("serpapi://"):
         return "search_api"
-    if detect_ats_provider(url) is not None:
+    detected = detect_ats_provider(url)
+    if detected is not None and detected[0] in PARSEABLE_ATS_PROVIDERS:
         return "ats_api"
     if any(hint in lowered for hint in _RSS_HINTS):
         return "rss"
@@ -213,6 +266,37 @@ async def create_source_as_admin(
     db.add(source)
     await db.commit()
     await db.refresh(source)
+    return source
+
+
+async def register_discovered_board(
+    db: AsyncSession, company_id: uuid.UUID, board_url: str
+) -> Source | None:
+    """Attach a board found on a company's careers page.
+
+    Deliberately does not commit: this runs inside a crawl's transaction, which
+    also holds job and score writes, and committing here would split them.
+    Returns None when the board is already registered, which is the common case
+    on every crawl after the first.
+    """
+    url = validate_url(board_url)
+
+    existing = await db.scalar(select(Source).where(Source.url == url))
+    if existing is not None:
+        return None
+
+    source = Source(
+        company_id=company_id,
+        url=url,
+        source_type="ats_api",
+        fetch_tier="ats_api",
+        status="approved",
+        next_crawl_at=datetime.now(UTC),
+        crawl_frequency_minutes=DEFAULT_FREQUENCIES["ats_api"],
+        reliability_score=DEFAULT_RELIABILITY["ats_api"],
+    )
+    db.add(source)
+    logger.info("discovered ATS board %s for company %s", url, company_id)
     return source
 
 
