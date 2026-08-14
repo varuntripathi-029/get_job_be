@@ -1,0 +1,37 @@
+# Without this, `COPY . .` drops the host's .venv into the image on top of the
+# one the builder just created. On a Windows or macOS checkout those are
+# binaries for the wrong platform entirely, and they land at exactly the path
+# the container runs from — a build that succeeds and an image that cannot
+# start. It is also 400MB+ of pure waste on every layer and every push.
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+.git/
+.github/
+.gitignore
+.gitattributes
+
+# Not needed at runtime, and each one invalidates the layer cache when touched.
+tests/
+docs/
+designs/
+
+# Markdown is deliberately NOT excluded wholesale: the seed registry is a .md
+# file that scripts/seed.py parses, so a blanket *.md rule makes seeding inside
+# the container fail with a confusing "registry not found".
+
+*.log
+.DS_Store
+docker-compose.yml
+Dockerfile
+.dockerignore
