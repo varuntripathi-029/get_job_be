@@ -1,0 +1,98 @@
+# Celery Beat's replacement.
+#
+# Free hosting gives you one process that sleeps when idle, which is nowhere
+# for a long-running scheduler to live. GitHub Actions runs the clock instead
+# and pokes the API, so the deployment needs no worker and no beat process.
+#
+# Setup — two repository secrets (Settings -> Secrets and variables -> Actions):
+#   API_BASE_URL     https://your-service.onrender.com   (no trailing slash)
+#   SCHEDULER_TOKEN  the same value as SCHEDULER_TOKEN on Render
+#
+# Note on timing: GitHub's scheduled runs are best-effort and get delayed under
+# load, sometimes by 10-15 minutes. That is fine here — crawl frequencies run
+# 360-4320 minutes, so the tick only has to be roughly on time. Do not use this
+# for anything that needs punctuality.
+
+name: scheduler
+
+on:
+  schedule:
+    # Every 15 minutes. More often than this mostly wakes a sleeping free
+    # instance rather than finding work; the tick leases whatever is due, so a
+    # missed run is picked up by the next one rather than lost.
+    - cron: "*/15 * * * *"
+    # 03:10 UTC — prune crawl logs.
+    - cron: "10 3 * * *"
+    # 00:20 and 12:20 UTC — resync every ATS board.
+    - cron: "20 0,12 * * *"
+    # 02:30, 08:30, 14:30, 20:30 UTC — backfill embeddings.
+    - cron: "30 2,8,14,20 * * *"
+    # Monday 09:05 UTC — the weekly newsletter.
+    - cron: "5 9 * * 1"
+  workflow_dispatch:
+    inputs:
+      job:
+        description: Which job to run now
+        required: true
+        default: tick
+        type: choice
+        options: [tick, sync-jobs, embeddings, cleanup, newsletter]
+
+# A slow tick must not overlap the next one. Sources are leased before they are
+# crawled so an overlap would be safe, just wasteful — this keeps it tidy.
+concurrency:
+  group: scheduler-${{ github.event.schedule || inputs.job }}
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Pick the endpoint for this trigger
+        id: pick
+        run: |
+          case "${{ github.event.schedule }}" in
+            "*/15 * * * *")        job=tick ;;
+            "10 3 * * *")         job=cleanup ;;
+            "20 0,12 * * *")      job=sync-jobs ;;
+            "30 2,8,14,20 * * *") job=embeddings ;;
+            "5 9 * * 1")          job=newsletter ;;
+            *)                    job="${{ inputs.job || 'tick' }}" ;;
+          esac
+          echo "job=$job" >> "$GITHUB_OUTPUT"
+          echo "Running: $job"
+
+      - name: Call the scheduler
+        env:
+          BASE: ${{ secrets.API_BASE_URL }}
+          TOKEN: ${{ secrets.SCHEDULER_TOKEN }}
+          JOB: ${{ steps.pick.outputs.job }}
+        run: |
+          if [ -z "$BASE" ] || [ -z "$TOKEN" ]; then
+            echo "::error::API_BASE_URL or SCHEDULER_TOKEN is not set in repository secrets."
+            exit 1
+          fi
+
+          # A free instance spins down when idle and takes up to ~60s to wake,
+          # so --retry-connrefused covers the cold start. The body goes to a
+          # file and the status to stdout, which keeps the exit path simple:
+          # curl's own exit code conflates transport and HTTP failures.
+          code=$(curl -sS -X POST "$BASE/scheduler/$JOB" \
+            -H "X-Scheduler-Token: $TOKEN" \
+            --retry 3 --retry-delay 20 --retry-connrefused \
+            --connect-timeout 30 --max-time 300 \
+            -o /tmp/body -w '%{http_code}') || code="000"
+
+          echo "HTTP $code"
+          # The response says what actually happened — how many sources were
+          # due, crawled and deferred. Worth having in the run log.
+          cat /tmp/body 2>/dev/null || true
+          echo
+          case "$code" in
+            2*)  echo "OK" ;;
+            000) echo "::error::Could not reach $BASE — is the service up?"; exit 1 ;;
+            401) echo "::error::Rejected — SCHEDULER_TOKEN does not match the server."; exit 1 ;;
+            503) echo "::error::Scheduler disabled — SCHEDULER_TOKEN is unset on the server."; exit 1 ;;
+            *)   echo "::error::Scheduler call failed with HTTP $code"; exit 1 ;;
+          esac
