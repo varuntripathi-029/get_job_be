@@ -69,6 +69,7 @@ class PlaywrightFetcher(BaseFetcher):
         text = html_to_text(html)
         return FetchResult(
             content=text,
+            raw_html=html,
             content_hash=content_hash(text),
             http_status=200,
             content_type="text/html",

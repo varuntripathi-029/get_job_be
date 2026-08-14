@@ -61,6 +61,7 @@ class StaticFetcher(BaseFetcher):
         text = html_to_text(response.text)
         return FetchResult(
             content=text,
+            raw_html=response.text,
             # Over the cleaned text, so rotating ads, CSRF tokens and build
             # hashes in the markup do not register as a content change.
             content_hash=content_hash(text),

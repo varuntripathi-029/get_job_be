@@ -27,6 +27,11 @@ class FetchResult:
     content_type: str
     duration_ms: int
     error: str | None = None
+    # The markup `content` was reduced from, kept only by the HTML tiers.
+    # Nothing may hash or diff this — it churns on every request — but ATS
+    # discovery needs it, because a board is referenced from an iframe src or
+    # an inline script that html_to_text deletes before anyone can see it.
+    raw_html: str | None = None
 
     @property
     def ok(self) -> bool:
