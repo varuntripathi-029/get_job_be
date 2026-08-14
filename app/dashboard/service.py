@@ -16,6 +16,7 @@ from __future__ import annotations
 import functools
 import logging
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -23,11 +24,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.companies.models import Company
+from app.config import settings
 from app.dashboard.schemas import (
     ActivityEvent,
+    CrawlBudgetResponse,
     DashboardStats,
     IndustriesResponse,
     IndustryBreakdown,
+    QuotaRow,
     TrendingCompany,
 )
 from app.extraction.models import Event
@@ -264,4 +268,68 @@ async def industry_breakdown(db: AsyncSession) -> IndustriesResponse:
             )
             for industry, count, avg in rows
         ]
+    )
+
+
+async def crawl_budget() -> CrawlBudgetResponse:
+    """Today's remaining free-tier budget for third-party lookups.
+
+    Only vendors that are actually configured are reported — an unused key is
+    not a limit the user is running into, and listing it as "0 of 8 used" reads
+    as a problem when it is not.
+    """
+    from app.crawler.fetchers.news_api import QuotaTracker
+
+    redis_client = None
+    if settings.redis_url:
+        try:
+            from redis.asyncio import from_url
+
+            redis_client = from_url(
+                settings.redis_url, socket_connect_timeout=5, decode_responses=True
+            )
+            await redis_client.ping()
+        except Exception as exc:  # noqa: BLE001 — a missing Redis is not an error here
+            logger.warning("crawl budget: Redis unavailable (%s)", exc)
+            redis_client = None
+
+    tracker = QuotaTracker(redis_client)
+    configured = {
+        "newsapi": bool(settings.newsapi_key),
+        "gnews": bool(settings.gnews_api_key),
+        "serpapi": bool(settings.serpapi_key),
+    }
+    try:
+        rows = [
+            QuotaRow(**row)  # type: ignore[arg-type]
+            for row in await tracker.status()
+            if configured.get(str(row["api"]), False)
+        ]
+    finally:
+        if redis_client is not None:
+            with suppress(Exception):
+                await redis_client.aclose()
+
+    spent = [row for row in rows if row.exhausted]
+    # Paused only when every configured vendor is spent. While one still has
+    # budget the crawl keeps finding things, and a banner would be a lie.
+    paused = bool(rows) and len(spent) == len(rows)
+
+    message = None
+    if paused:
+        message = (
+            "We've used up today's free lookup budget, so new roles won't appear "
+            "until it resets. Everything already found is still here."
+        )
+    elif spent:
+        names = ", ".join(row.api for row in spent)
+        message = (
+            f"Daily budget spent for {names}; still searching with the rest."
+        )
+
+    return CrawlBudgetResponse(
+        paused=paused,
+        resets_at=QuotaTracker.resets_at(),
+        message=message,
+        vendors=rows,
     )

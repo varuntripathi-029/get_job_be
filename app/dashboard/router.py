@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.dashboard import service
 from app.dashboard.schemas import (
     ActivityResponse,
+    CrawlBudgetResponse,
     DashboardStats,
     IndustriesResponse,
     TrendingResponse,
@@ -56,3 +57,17 @@ async def activity(
 async def industries(db: DbSession) -> IndustriesResponse:
     """Company count and average momentum per industry. Cached 30 minutes."""
     return await service.industry_breakdown(db)
+
+
+@router.get(
+    "/crawl-budget",
+    response_model=CrawlBudgetResponse,
+    summary="Whether today's third-party lookup budget is spent",
+)
+async def crawl_budget() -> CrawlBudgetResponse:
+    """Report the daily free-tier budget for external lookups.
+
+    Not cached and not authenticated: it is a handful of Redis reads, and the
+    whole point is to be current the moment the budget runs out.
+    """
+    return await service.crawl_budget()

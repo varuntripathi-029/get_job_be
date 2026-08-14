@@ -6,6 +6,28 @@ from datetime import datetime
 from pydantic import BaseModel
 
 
+class QuotaRow(BaseModel):
+    api: str
+    used: int
+    limit: int
+    remaining: int
+    exhausted: bool
+
+
+class CrawlBudgetResponse(BaseModel):
+    """Whether third-party lookups are still affordable today.
+
+    Public on purpose. When the free-tier budget runs out the site stops
+    discovering new roles, and saying so plainly is better than letting the
+    feed look stale for no visible reason.
+    """
+
+    paused: bool
+    resets_at: datetime
+    message: str | None = None
+    vendors: list[QuotaRow]
+
+
 class DashboardStats(BaseModel):
     total_companies: int
     total_active_jobs: int
