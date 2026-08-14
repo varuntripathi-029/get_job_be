@@ -1,0 +1,70 @@
+# Render blueprint.
+#
+# One web service and nothing else. Render's free tier has no background
+# workers, so Celery Beat and the Celery worker have no home here — the
+# schedule is driven instead by an external cron calling /scheduler/*
+# (see .github/workflows/scheduler.yml). Every job Beat ran has an endpoint.
+#
+# Postgres and Redis are deliberately absent: this deployment points at Neon
+# and Upstash, which are not tied to the host and survive a redeploy.
+#
+# Secrets are marked sync:false so they are never committed here — set them
+# once in the Render dashboard and they persist across deploys.
+
+services:
+  - type: web
+    name: hiresignal-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: singapore # closest to the Indian companies being tracked
+    branch: main
+    healthCheckPath: /health
+    envVars:
+      # Render injects PORT; the Dockerfile reads it.
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: "false"
+
+      # --- Managed elsewhere: Neon and Upstash ---
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+
+      # --- Auth ---
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: JWT_SECRET_KEY
+        generateValue: true # Render generates and stores one
+
+      # --- Scheduler ---
+      # Must match SCHEDULER_TOKEN in the GitHub repo secrets. Left as
+      # sync:false rather than generateValue so both ends can be set to the
+      # same string; a generated one would only exist on Render.
+      - key: SCHEDULER_TOKEN
+        sync: false
+
+      # --- LLM and third-party APIs ---
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: NEWSAPI_KEY
+        sync: false
+      - key: GNEWS_API_KEY
+        sync: false
+      - key: SERPAPI_KEY
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+
+      - key: CORS_ORIGINS
+        sync: false # the deployed frontend's origin
+
+      # The free instance has 512MB. A headless Chromium does not fit beside
+      # the app, so the browser tier stays off here and `requires_js` sources
+      # fail loudly rather than OOM-killing the whole service.
+      - key: PLAYWRIGHT_MAX_CONCURRENT
+        value: "0"
