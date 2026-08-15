@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     xai_base_url: str = "https://api.x.ai/v1"
 
     classifier_provider: str = "groq"
-    classifier_model: str = "llama-3.1-8b-instant"
+    classifier_model: str = "openai/gpt-oss-20b"
     extractor_provider: str = "groq"
     extractor_model: str = "openai/gpt-oss-120b"
     llm_max_input_chars: int = 15000
