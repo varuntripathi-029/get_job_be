@@ -14,8 +14,9 @@ def _settings(**overrides: object) -> Settings:
 def test_defaults_to_groq_for_both_roles() -> None:
     s = _settings()
     assert s.classifier_provider == "groq"
-    assert s.classifier_model == "llama-3.1-8b-instant"
+    assert s.classifier_model == "openai/gpt-oss-20b"
     assert s.extractor_provider == "groq"
+    assert s.extractor_model == "openai/gpt-oss-120b"
     assert s.groq_base_url == "https://api.groq.com/openai/v1"
 
 
