@@ -120,9 +120,10 @@ async def crawler_health(
     _admin: AdminUser,
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
     only_failing: Annotated[bool, Query()] = False,
+    search: Annotated[str | None, Query(max_length=200)] = None,
 ) -> list[CrawlerHealthRow]:
     return await admin_service.crawler_health(
-        db, limit=limit, only_failing=only_failing
+        db, limit=limit, only_failing=only_failing, search=search
     )
 
 

@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.models import User
@@ -16,9 +16,17 @@ from app.sources.schemas import CrawlerHealthRow
 
 
 async def crawler_health(
-    db: AsyncSession, *, limit: int = 200, only_failing: bool = False
+    db: AsyncSession,
+    *,
+    limit: int = 200,
+    only_failing: bool = False,
+    search: str | None = None,
 ) -> list[CrawlerHealthRow]:
-    """Per-source crawl status, worst-offenders first."""
+    """Per-source crawl status, worst-offenders first.
+
+    `search` matches the URL or the attached company's name, so a specific
+    source can be found without paging past the limit.
+    """
     stmt = (
         select(Source, Company.name)
         .outerjoin(Company, Source.company_id == Company.id)
@@ -30,6 +38,14 @@ async def crawler_health(
     )
     if only_failing:
         stmt = stmt.where(Source.consecutive_failures > 0)
+    if search and search.strip():
+        pattern = f"%{search.strip().lower()}%"
+        stmt = stmt.where(
+            or_(
+                func.lower(Source.url).like(pattern),
+                func.lower(Company.name).like(pattern),
+            )
+        )
 
     result = await db.execute(stmt)
     return [
