@@ -22,7 +22,9 @@ async def crawler_health(
     stmt = (
         select(Source, Company.name)
         .outerjoin(Company, Source.company_id == Company.id)
-        .where(Source.status == "approved")
+        # Disabled sources are shown too so they can be re-enabled or deleted
+        # from here; pending and rejected live in the review queue instead.
+        .where(Source.status.in_(("approved", "disabled")))
         .order_by(Source.consecutive_failures.desc(), Source.next_crawl_at)
         .limit(limit)
     )

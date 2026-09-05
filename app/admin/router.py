@@ -68,6 +68,35 @@ async def update_source(
     return SourceResponse.model_validate(source)
 
 
+@router.post("/sources/{source_id}/disable", response_model=SourceResponse)
+async def disable_source(
+    source_id: uuid.UUID, db: DbSession, _admin: AdminUser
+) -> SourceResponse:
+    """Take an approved source out of the crawl rotation without deleting it.
+
+    Re-approve it later with the approve endpoint to resume crawling.
+    """
+    source = await source_service.disable_source(db, source_id)
+    return SourceResponse.model_validate(source)
+
+
+@router.post("/sources/{source_id}/redetect-tier", response_model=SourceResponse)
+async def redetect_tier(
+    source_id: uuid.UUID, db: DbSession, _admin: AdminUser
+) -> SourceResponse:
+    """Recompute the fetch tier and reschedule an approved source for now."""
+    source = await source_service.redetect_fetch_tier(db, source_id)
+    return SourceResponse.model_validate(source)
+
+
+@router.delete("/sources/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_source(
+    source_id: uuid.UUID, db: DbSession, _admin: AdminUser
+) -> None:
+    """Delete a source permanently, freeing its URL for resubmission."""
+    await source_service.delete_source(db, source_id)
+
+
 @router.post(
     "/companies/{company_id}/sources",
     response_model=SourceResponse,

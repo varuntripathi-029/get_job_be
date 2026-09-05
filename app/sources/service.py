@@ -357,6 +357,48 @@ async def disable_source(db: AsyncSession, source_id: uuid.UUID) -> Source:
     return source
 
 
+async def delete_source(db: AsyncSession, source_id: uuid.UUID) -> None:
+    """Remove a source entirely, freeing its URL for resubmission.
+
+    Crawl logs cascade; harvested jobs do not — Job.source_id is ON DELETE SET
+    NULL, so a source's jobs survive it but are no longer reconciled against any
+    board. Disable a source instead when its history matters; delete is for
+    clearing a mistake or a dead entry so the same URL can be added again.
+    """
+    source = await get_source(db, source_id)
+    await db.delete(source)
+    await db.commit()
+
+
+async def redetect_fetch_tier(db: AsyncSession, source_id: uuid.UUID) -> Source:
+    """Re-run tier detection on an existing source and bring its next crawl up.
+
+    A source keeps whatever fetch tier it was given when it was created, so one
+    added before a provider was recognised stays on the wrong tier forever — a
+    Keka careers page registered as static_http never reaches the ATS adapter.
+    This recomputes the tier from the current rules and, for an approved source,
+    clears the failure backoff and schedules it now so the change takes effect
+    on the next tick rather than after a long backoff.
+    """
+    source = await get_source(db, source_id)
+    if is_pseudo_url(source.url):
+        raise ValidationError("Cannot re-detect the tier of a pseudo-URL source.")
+
+    source.fetch_tier = detect_fetch_tier(source.url, source.source_type)
+    if source.status == "approved":
+        source.next_crawl_at = datetime.now(UTC)
+        source.consecutive_failures = 0
+        source.last_failure_reason = None
+    await db.commit()
+    await db.refresh(source)
+
+    logger.info(
+        "source_tier_redetected id=%s url=%s tier=%s", source.id, source.url,
+        source.fetch_tier,
+    )
+    return source
+
+
 async def update_source(
     db: AsyncSession, source_id: uuid.UUID, data: SourceUpdate
 ) -> Source:
