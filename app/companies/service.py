@@ -79,6 +79,38 @@ async def create_company(db: AsyncSession, data: CompanyCreate) -> Company:
     return company
 
 
+async def get_or_create_by_domain(
+    db: AsyncSession, *, name: str, domain: str
+) -> tuple[Company, bool]:
+    """Match a company by canonical domain, or build one without committing.
+
+    Returns `(company, created)`. Flushes so the new row's id is available to
+    the caller, but leaves the commit to the caller: this runs inside a crawl's
+    transaction alongside job and score writes, and committing here would split
+    them — the same reason `sources.service.register_discovered_board` does not
+    commit.
+
+    Matching on the domain, not the name, is what keeps a company from being
+    created twice: the same firm reached through two different sources resolves
+    to one row.
+    """
+    normalized = normalize_domain(domain)
+    existing = await db.scalar(
+        select(Company).where(Company.canonical_domain == normalized)
+    )
+    if existing is not None:
+        return existing, False
+
+    company = Company(
+        name=name,
+        canonical_domain=normalized,
+        slug=await _unique_slug(db, slugify(name)),
+    )
+    db.add(company)
+    await db.flush()
+    return company, True
+
+
 async def get_company_by_slug(db: AsyncSession, slug: str) -> Company:
     company = await db.scalar(select(Company).where(Company.slug == slug))
     if company is None:

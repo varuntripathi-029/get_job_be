@@ -110,6 +110,14 @@ _ATS_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
         "pinpoint",
         "https://{token}.pinpointhq.com/jobs.json",
     ),
+    # Keka's real feed needs a runtime board-id lookup (see ats.py), so the
+    # template here is only a marker — the crawler fetches through ATSFetcher,
+    # which ignores it. What matters is that the URL is recognised as ats_api.
+    (
+        re.compile(r"^(?P<token>[^.]+)\.keka\.com"),
+        "keka",
+        "https://{token}.keka.com/careers/",
+    ),
 ]
 
 # Only these have a response parser in app/crawler/fetchers/ats.py. The
@@ -118,7 +126,7 @@ _ATS_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
 # zero jobs on every crawl forever — a source that looks healthy and produces
 # nothing. Anything unparsed is better off on the career-page path, which at
 # least reads titles out of the rendered HTML.
-PARSEABLE_ATS_PROVIDERS = frozenset({"greenhouse", "lever", "ashby"})
+PARSEABLE_ATS_PROVIDERS = frozenset({"greenhouse", "lever", "ashby", "keka"})
 
 # Internal identifiers, not real URLs — these never hit SSRF validation.
 _PSEUDO_SCHEMES = ("newsapi://", "gnews://", "serpapi://")

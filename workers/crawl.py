@@ -18,7 +18,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.common.exceptions import SSRFError
 from app.companies.matcher import find_companies_in_text, resolve_event_subject
 from app.companies.models import Company
+from app.companies.service import get_or_create_by_domain
 from app.config import settings
+from app.crawler.fetchers.ats import describe_company
 from app.crawler.fetchers.base import FetchResult
 from app.crawler.fetchers.browser import PlaywrightFetcher
 from app.crawler.fetchers.html_text import html_to_linked_text
@@ -179,10 +181,48 @@ async def _extract_and_store(
 # --- per-tier handlers -------------------------------------------------------
 
 
+async def _ensure_ats_company(db: AsyncSession, source: Source) -> Company:
+    """The company an ATS source feeds, onboarding it from the source if needed.
+
+    A structured ATS board is one company's board, and for supported providers
+    the feed identifies that company itself — so an approved source with no
+    company attached onboards its own rather than sitting orphaned and
+    invisible. This is safe here in a way it is not for news: the identity comes
+    from the company's own portal, not from prose that merely mentions it.
+    """
+    if source.company_id is not None:
+        company = await db.get(Company, source.company_id)
+        if company is None:
+            raise ValueError("ATS source points at a company that no longer exists")
+        return company
+
+    identity = await describe_company(source.url)
+    if identity is None:
+        raise ValueError(
+            "ATS source has no company attached and its provider cannot identify "
+            "one automatically; attach a company to this source manually"
+        )
+
+    company, created = await get_or_create_by_domain(
+        db, name=identity.name, domain=identity.domain
+    )
+    source.company_id = company.id
+    if created:
+        logger.info(
+            "onboarded company %r (%s) from ATS source %s",
+            company.name,
+            company.canonical_domain,
+            source.url,
+        )
+    else:
+        logger.info(
+            "bonded ATS source %s to existing company %r", source.url, company.name
+        )
+    return company
+
+
 async def _crawl_ats(db: AsyncSession, source: Source) -> tuple[int, str]:
-    company = await db.get(Company, source.company_id)
-    if company is None:
-        raise ValueError("ATS source has no company attached")
+    company = await _ensure_ats_company(db, source)
 
     result = await sync_company_jobs(db, company, source)
     events = 0
