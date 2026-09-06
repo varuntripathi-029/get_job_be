@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 from sqlalchemy import Select, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.common.exceptions import ConflictError, NotFoundError, ValidationError
 from app.common.pagination import PaginatedResponse, PaginationParams, paginate
@@ -366,60 +367,161 @@ async def compare_companies(
         names = ", ".join(repr(m) for m in missing)
         raise NotFoundError(f"No company with slug {names}.")
 
-    return [await _comparison_for(db, by_slug[slug]) for slug in unique]
+    # Local import: extraction.service imports companies.models, so importing it
+    # at module scope would risk a circular edge.
+    from app.extraction.service import recent_events_for_companies
+
+    companies = [by_slug[slug] for slug in unique]
+    ids = [c.id for c in companies]
+
+    # Everything the comparison needs, fetched set-based across all companies at
+    # once rather than per company. The old form ran five queries inside a loop
+    # over 2-5 companies — the textbook N+1; each of these runs exactly once no
+    # matter how many companies are compared.
+    scores = await _latest_scores_for(db, ids)
+    families = await _active_jobs_by_family_for(db, ids)
+    recent = await _recent_event_counts_for(db, ids)
+    histories = await _score_histories_for(db, ids, limit=10)
+    top_events = await recent_events_for_companies(db, ids, limit=3)
+
+    return [
+        _build_comparison(
+            company,
+            scores.get(company.id),
+            families.get(company.id, {}),
+            recent.get(company.id, 0),
+            histories.get(company.id, []),
+            top_events.get(company.id, []),
+        )
+        for company in companies
+    ]
 
 
-async def _comparison_for(db: AsyncSession, company: Company) -> CompanyComparison:
-    from app.extraction.service import recent_events_for_company
-
-    score = await get_latest_score(db, company.id)
-
-    # Grouped on the raw column, with NULL folded into "other" afterwards.
-    # coalesce(role_family, 'other') in both SELECT and GROUP BY looks
-    # equivalent but is not: SQLAlchemy renders the literal as a bind parameter,
-    # and Postgres will not match $1 against $3, so it rejects the query with
-    # "column jobs.role_family must appear in the GROUP BY clause".
-    family_rows = (
+async def _latest_scores_for(
+    db: AsyncSession, ids: list[uuid.UUID]
+) -> dict[uuid.UUID, tuple[float, str]]:
+    """The most recent (score, label) per company, in one query."""
+    latest = _latest_scores()
+    rows = (
         await db.execute(
-            select(Job.role_family, func.count(Job.id))
-            .where(Job.company_id == company.id, Job.is_active.is_(True))
-            .group_by(Job.role_family)
+            select(
+                latest.c.company_id,
+                latest.c.momentum_score,
+                latest.c.momentum_label,
+            ).where(latest.c.company_id.in_(ids))
         )
     ).all()
-    by_family: dict[str, int] = {}
-    for family, count in family_rows:
+    return {cid: (score, label) for cid, score, label in rows}
+
+
+async def _active_jobs_by_family_for(
+    db: AsyncSession, ids: list[uuid.UUID]
+) -> dict[uuid.UUID, dict[str, int]]:
+    """Active job counts per role family, per company, in one grouped query.
+
+    Grouped on the raw column with NULL folded into "other" in Python:
+    coalesce(role_family, 'other') in both SELECT and GROUP BY looks equivalent
+    but is not — SQLAlchemy renders the literal as a bind parameter, and Postgres
+    will not match $1 against $3, so it rejects the query with "column
+    jobs.role_family must appear in the GROUP BY clause".
+    """
+    rows = (
+        await db.execute(
+            select(Job.company_id, Job.role_family, func.count(Job.id))
+            .where(Job.company_id.in_(ids), Job.is_active.is_(True))
+            .group_by(Job.company_id, Job.role_family)
+        )
+    ).all()
+    out: dict[uuid.UUID, dict[str, int]] = {}
+    for company_id, family, count in rows:
+        by_family = out.setdefault(company_id, {})
         key = family or "other"
         by_family[key] = by_family.get(key, 0) + int(count)
+    return out
 
-    since = datetime.now(UTC) - timedelta(days=30)
-    recent_count = int(
-        await db.scalar(
-            select(func.count())
-            .select_from(Event)
+
+async def _recent_event_counts_for(
+    db: AsyncSession, ids: list[uuid.UUID], *, days: int = 30
+) -> dict[uuid.UUID, int]:
+    """Canonical, active events in the last `days`, counted per company."""
+    since = datetime.now(UTC) - timedelta(days=days)
+    rows = (
+        await db.execute(
+            select(Event.company_id, func.count())
             .where(
-                Event.company_id == company.id,
+                Event.company_id.in_(ids),
                 Event.observed_at >= since,
                 Event.is_canonical.is_(True),
                 Event.status == "active",
             )
+            .group_by(Event.company_id)
         )
-        or 0
+    ).all()
+    return {company_id: int(count) for company_id, count in rows}
+
+
+async def _score_histories_for(
+    db: AsyncSession, ids: list[uuid.UUID], *, limit: int
+) -> dict[uuid.UUID, list[CompanyScore]]:
+    """The last `limit` scores per company, oldest-first, in one query.
+
+    A window function ranks each company's scores independently so a single scan
+    replaces one `get_score_history` call per company. Selected newest-first (so
+    the limit keeps the most recent points), then reversed to oldest-first to
+    match what the chart expects — the same convention `get_score_history` uses.
+    """
+    rank = (
+        func.row_number()
+        .over(
+            partition_by=CompanyScore.company_id,
+            order_by=CompanyScore.scored_at.desc(),
+        )
+        .label("rn")
     )
+    ranked = (
+        select(CompanyScore, rank)
+        .where(CompanyScore.company_id.in_(ids))
+        .subquery()
+    )
+    score = aliased(CompanyScore, ranked)
+    rows = list(
+        (
+            await db.execute(
+                select(score)
+                .where(ranked.c.rn <= limit)
+                .order_by(score.company_id, ranked.c.rn)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    out: dict[uuid.UUID, list[CompanyScore]] = {}
+    for row in rows:
+        out.setdefault(row.company_id, []).append(row)
+    # rn ascending is scored_at descending, so each list is newest-first here.
+    return {cid: list(reversed(scores)) for cid, scores in out.items()}
 
-    history = await get_score_history(db, company.id, limit=10)
 
+def _build_comparison(
+    company: Company,
+    score: tuple[float, str] | None,
+    by_family: dict[str, int],
+    recent_count: int,
+    history: list[CompanyScore],
+    top_events: list,
+) -> CompanyComparison:
     return CompanyComparison(
         slug=company.slug,
         name=company.name,
         industry=company.industry,
         stage=company.stage,
-        momentum_score=score.momentum_score if score else None,
-        momentum_label=score.momentum_label if score else None,
+        momentum_score=score[0] if score else None,
+        momentum_label=score[1] if score else None,
         active_jobs=sum(by_family.values()),
         active_jobs_by_family=by_family,
         recent_events=recent_count,
         score_history=[ScorePoint.model_validate(s) for s in history],
-        top_events=await recent_events_for_company(db, company.id, limit=3),
+        top_events=top_events,
     )
 
 

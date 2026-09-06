@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.common.exceptions import ValidationError
 from app.common.pagination import PaginatedResponse, PaginationParams, paginate
@@ -141,6 +143,53 @@ async def recent_events_for_company(
         .limit(limit)
     )
     return [_to_response(row) for row in result.all()]
+
+
+async def recent_events_for_companies(
+    db: AsyncSession, company_ids: list[uuid.UUID], *, limit: int = 5
+) -> dict[uuid.UUID, list[EventResponse]]:
+    """The top-N recent events for each of several companies, in one query.
+
+    The set-based form of calling `recent_events_for_company` in a loop: a
+    window function ranks each company's events independently, so N companies
+    cost one scan instead of N round trips. Returns a map keyed by company id;
+    a company with no events is simply absent, and the caller defaults it.
+    """
+    if not company_ids:
+        return {}
+
+    rank = (
+        func.row_number()
+        .over(
+            partition_by=Event.company_id,
+            order_by=(Event.observed_at.desc(), Event.id.desc()),
+        )
+        .label("rn")
+    )
+    ranked = (
+        select(Event, rank)
+        .where(
+            Event.company_id.in_(company_ids),
+            Event.is_canonical.is_(True),
+            Event.status == "active",
+        )
+        .subquery()
+    )
+    event = aliased(Event, ranked)
+
+    rows = (
+        await db.execute(
+            select(event, Company.name, Company.slug)
+            .join(Company, Company.id == event.company_id)
+            .where(ranked.c.rn <= limit)
+            .order_by(event.company_id, ranked.c.rn)
+        )
+    ).all()
+
+    out: dict[uuid.UUID, list[EventResponse]] = {}
+    for row in rows:
+        out.setdefault(row[0].company_id, []).append(_to_response(row))
+    return out
 
 
 def _to_response(row) -> EventResponse:
