@@ -88,6 +88,16 @@ async def run_tick(
     }
 
 
+async def run_retier_sweep() -> dict[str, Any]:
+    """Promote any source now recognisable as a parseable ATS to the ats_api
+    tier. Cheap and idempotent — a no-op once everything is on the right tier —
+    so an external cron can call it as often as it likes."""
+    from app.sources.service import resync_fetch_tiers
+
+    async with AsyncSessionLocal() as db:
+        return await resync_fetch_tiers(db)
+
+
 async def run_sync_jobs() -> dict[str, Any]:
     from workers.jobs_sync import _sync_all
 

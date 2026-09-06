@@ -71,6 +71,22 @@ async def sync_jobs() -> dict[str, object]:
     return await service.run_sync_jobs()
 
 
+@router.post(
+    "/retier",
+    dependencies=Guarded,
+    summary="Promote sources now recognisable as a parseable ATS",
+)
+async def retier() -> dict[str, object]:
+    """Keeps fetch tiers in step with the adapters we ship.
+
+    A source's tier is frozen at creation, so any source added before its ATS
+    provider was supported stays on the wrong tier. Running this on a cron means
+    that self-corrects instead of waiting for someone to notice a company shows
+    nothing and re-detect it by hand.
+    """
+    return await service.run_retier_sweep()
+
+
 @router.post("/embeddings", dependencies=Guarded, summary="Backfill job embeddings")
 async def embeddings(
     batch_size: Annotated[int | None, Query(ge=1, le=500)] = None,
