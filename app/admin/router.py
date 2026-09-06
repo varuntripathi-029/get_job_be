@@ -211,9 +211,20 @@ async def generate_embeddings(
 async def crawl_now(
     source_id: uuid.UUID, db: DbSession, _admin: AdminUser
 ) -> dict[str, object]:
-    """Queue an immediate crawl, bypassing next_crawl_at."""
-    source = await source_service.get_source(db, source_id)
-    from workers.crawl import crawl_source
+    """Crawl one source right now, inline, and return the outcome.
 
-    task = crawl_source.delay(str(source.id))
-    return {"queued": True, "task_id": task.id, "url": source.url}
+    Runs the crawl in-process rather than dispatching to Celery: this deployment
+    has no worker, so a queued task would never run — the button used to look
+    like it worked while doing nothing. A fresh session isolates the crawl's
+    transaction from this request's, matching how the scheduler tick crawls each
+    source. This bypasses the queue, so a source stuck behind a long backlog can
+    be forced immediately.
+    """
+    source = await source_service.get_source(db, source_id)
+
+    from app.database import AsyncSessionLocal
+    from workers.crawl import _crawl
+
+    async with AsyncSessionLocal() as crawl_db:
+        result = await _crawl(crawl_db, str(source.id))
+    return {"crawled": True, "url": source.url, "result": result}

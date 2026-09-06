@@ -175,11 +175,13 @@ class Settings(BaseSettings):
     playwright_timeout_seconds: int = 60
     rate_limit_seconds_per_domain: float = 5.0
     crawl_log_retention_days: int = 10
-    # Sources crawled per HTTP scheduler tick. Small on purpose: each one may
-    # involve a browser launch and an LLM call, and a bounded batch is what
-    # keeps the request inside scheduler_deadline_seconds. Was previously
-    # declared and never read; now it does the job its name implies.
-    scheduler_batch_size: int = 3
+    # Sources crawled per HTTP scheduler tick. scheduler_deadline_seconds is the
+    # real cap — the tick stops crawling once it hits the deadline — so this only
+    # needs to be high enough that fast sources (ATS/RSS, a couple of seconds
+    # each) are not left on the table when the batch could fit more inside the
+    # deadline. At 3 the backlog grew faster than it drained; 8 lets a tick clear
+    # more without risking the request timeout on a slow one.
+    scheduler_batch_size: int = 8
 
     @field_validator("cors_origins", mode="before")
     @classmethod
