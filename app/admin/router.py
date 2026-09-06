@@ -89,6 +89,18 @@ async def redetect_tier(
     return SourceResponse.model_validate(source)
 
 
+@router.post("/sources/retier")
+async def retier_sources(db: DbSession, _admin: AdminUser) -> dict[str, object]:
+    """Sweep every live source and promote any now recognisable as a parseable
+    ATS to the ats_api tier, in one pass.
+
+    The per-source "re-detect tier" button fixes one row; this fixes the whole
+    table. Use it after shipping a new adapter to clear out every source that was
+    added before the provider was supported without hunting them down one by one.
+    """
+    return await source_service.resync_fetch_tiers(db)
+
+
 @router.delete("/sources/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_source(
     source_id: uuid.UUID, db: DbSession, _admin: AdminUser
