@@ -346,6 +346,64 @@ async def get_source(db: AsyncSession, source_id: uuid.UUID) -> Source:
     return source
 
 
+def _upgrade_to_ats_tier(source: Source) -> bool:
+    """Move a source to the ats_api tier if its URL is now a parseable ATS board
+    but it is sitting on some other tier. Returns whether it changed.
+
+    This is the one tier change safe to apply automatically. A recognised ATS
+    board only ever wants the ATS adapter, so promoting it can't fight a tier an
+    admin picked on purpose the way a blanket re-detect could — the only thing it
+    ever overrides is a stale guess made before the provider was supported. That
+    stale guess is exactly the Blitz bug: a Keka careers page registered as
+    static_http, reaching the wrong fetcher, silently yielding nothing forever.
+    """
+    if is_pseudo_url(source.url):
+        return False
+    detected = detect_ats_provider(source.url)
+    if detected is None or detected[0] not in PARSEABLE_ATS_PROVIDERS:
+        return False
+    if source.fetch_tier == "ats_api":
+        return False
+    source.fetch_tier = "ats_api"
+    return True
+
+
+async def resync_fetch_tiers(db: AsyncSession) -> dict[str, object]:
+    """Sweep live sources and promote any now recognisable as a parseable ATS
+    to the ats_api tier.
+
+    Fetch tier is decided once, at creation, and stored on the row — deploying a
+    new adapter does not retier the sources already in the table. So the day Keka
+    support shipped, every Keka source already registered stayed on static_http
+    and kept yielding nothing; each had to be re-detected by hand. Run once, this
+    fixes all of them at once. Run on a schedule, the next adapter we add needs no
+    cleanup — the sweep promotes whatever now matches on its own.
+
+    Conservative on purpose: it only ever moves a source *up* to ats_api and
+    touches no other tier, so it can't undo an admin's manual choice. Promoted
+    approved sources are rescheduled now with their failure backoff cleared, so
+    the fix lands on the next tick instead of after a long backoff.
+    """
+    now = datetime.now(UTC)
+    result = await db.execute(
+        select(Source).where(Source.status.in_(("approved", "pending")))
+    )
+    upgraded: list[str] = []
+    for source in result.scalars():
+        if _upgrade_to_ats_tier(source):
+            if source.status == "approved":
+                source.next_crawl_at = now
+                source.consecutive_failures = 0
+                source.last_failure_reason = None
+            upgraded.append(source.url)
+
+    if upgraded:
+        await db.commit()
+        logger.info("retier sweep promoted %d source(s) to ats_api", len(upgraded))
+
+    return {"upgraded": len(upgraded), "urls": upgraded}
+
+
 async def approve_source(
     db: AsyncSession, admin_id: uuid.UUID, source_id: uuid.UUID
 ) -> Source:
@@ -356,6 +414,10 @@ async def approve_source(
         validate_url(source.url)
 
     source.status = "approved"
+    # Re-check the tier against today's rules on the way in, so a source that was
+    # submitted before its ATS provider was recognised goes live on the ats_api
+    # tier instead of the stale guess it was given at submit time.
+    _upgrade_to_ats_tier(source)
     source.next_crawl_at = datetime.now(UTC)
     source.rejection_reason = None
     await db.commit()
