@@ -308,6 +308,37 @@ async def register_discovered_board(
     return source
 
 
+async def register_discovered_feed(
+    db: AsyncSession, company_id: uuid.UUID, feed_url: str
+) -> Source | None:
+    """Attach an RSS feed discovered on a company's blog page.
+
+    Like `register_discovered_board`: does not commit (it runs inside a crawl's
+    transaction) and returns None when the feed is already registered, which is
+    every crawl after the first. Turns a blog scrape into the cheaper, dated,
+    one-post-at-a-time RSS path.
+    """
+    url = validate_url(feed_url)
+
+    existing = await db.scalar(select(Source).where(Source.url == url))
+    if existing is not None:
+        return None
+
+    source = Source(
+        company_id=company_id,
+        url=url,
+        source_type="rss_feed",
+        fetch_tier="rss",
+        status="approved",
+        next_crawl_at=datetime.now(UTC),
+        crawl_frequency_minutes=DEFAULT_FREQUENCIES["rss_feed"],
+        reliability_score=DEFAULT_RELIABILITY["rss_feed"],
+    )
+    db.add(source)
+    logger.info("discovered RSS feed %s for company %s", url, company_id)
+    return source
+
+
 async def get_source(db: AsyncSession, source_id: uuid.UUID) -> Source:
     source = await db.get(Source, source_id)
     if source is None:

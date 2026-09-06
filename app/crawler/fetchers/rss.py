@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from datetime import UTC, datetime
+from urllib.parse import urljoin
 
 import feedparser
 import httpx
@@ -28,6 +30,34 @@ from app.crawler.fetchers.html_text import html_to_text
 logger = logging.getLogger(__name__)
 
 MAX_ENTRIES = 25
+
+# A page advertises its feed with <link rel="alternate" type="application/
+# rss+xml" href="…">. Order of attributes varies, so each is matched
+# independently within one <link> tag rather than in a fixed sequence.
+_LINK_TAG_RE = re.compile(r"<link\b[^>]*>", re.I)
+_FEED_TYPE_RE = re.compile(r"type=[\"']?application/(?:rss|atom)\+xml", re.I)
+_HREF_RE = re.compile(r"href=[\"']([^\"']+)[\"']", re.I)
+
+
+def discover_feed_url(html: str, base_url: str) -> str | None:
+    """The RSS/Atom feed a page links to in its head, absolute, or None.
+
+    Many blogs publish their feed at a path no one would guess — Keka's is at
+    /hubfs/rss, not /blog/feed — but advertise it with a <link rel="alternate">.
+    Reading that turns a dead guess into the real feed. A page with no such link
+    (a blog that simply has no feed) returns None, and the caller falls back to
+    scraping the HTML.
+    """
+    if not html:
+        return None
+    for match in _LINK_TAG_RE.finditer(html):
+        tag = match.group(0)
+        if "alternate" not in tag.lower() or not _FEED_TYPE_RE.search(tag):
+            continue
+        href = _HREF_RE.search(tag)
+        if href:
+            return urljoin(base_url, href.group(1))
+    return None
 
 
 def _published(entry) -> str | None:
@@ -69,11 +99,15 @@ class RSSFetcher(BaseFetcher):
             )
 
         parsed = feedparser.parse(response.text)
-        # bozo means malformed XML. Many real feeds are slightly malformed and
-        # still parse, so this only matters when nothing came out.
-        if parsed.bozo and not parsed.entries:
+        # No entries is a real failure, not a quiet success: a feed at the wrong
+        # path or an empty placeholder (Keka's /hubfs/rss is a bare channel with
+        # zero items) would otherwise look healthy while producing nothing. bozo
+        # only matters here — many valid feeds are slightly malformed but still
+        # yield entries.
+        if not parsed.entries:
+            reason = parsed.get("bozo_exception") if parsed.bozo else "no entries"
             return failure(
-                f"feed did not parse: {parsed.get('bozo_exception')}",
+                f"feed produced no entries ({reason})",
                 status=response.status_code,
                 duration_ms=elapsed,
             )

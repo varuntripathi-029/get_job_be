@@ -25,7 +25,7 @@ from app.crawler.fetchers.base import FetchResult
 from app.crawler.fetchers.browser import PlaywrightFetcher
 from app.crawler.fetchers.html_text import html_to_linked_text
 from app.crawler.fetchers.news_api import NewsAPIFetcher, NewsArticle, QuotaTracker
-from app.crawler.fetchers.rss import RSSFetcher
+from app.crawler.fetchers.rss import RSSFetcher, discover_feed_url
 from app.crawler.fetchers.static import StaticFetcher
 from app.crawler.models import CrawlLog
 from app.crawler.prefilter import is_relevant
@@ -39,7 +39,11 @@ from app.jobs.careers import extract_career_page_jobs
 from app.jobs.sync import reconcile_jobs, sync_company_jobs
 from app.scoring.engine import compute_score
 from app.sources.models import Source
-from app.sources.service import discover_ats_board, register_discovered_board
+from app.sources.service import (
+    discover_ats_board,
+    register_discovered_board,
+    register_discovered_feed,
+)
 from workers.base import run_async, with_session
 from workers.celery_app import celery_app
 
@@ -54,6 +58,12 @@ DISPATCH_LEASE_MINUTES = 60
 
 NEWS_TIERS = ("news_api", "search_api")
 NEWS_COMPANY_BATCH = 15
+
+# Blog sources scraped as HTML. When one advertises an RSS feed, that feed is
+# strictly better data (dated, one post at a time), so it is adopted and the
+# HTML scrape steps aside — the same trade as a career page giving way to an
+# ATS board.
+BLOG_SOURCE_TYPES = ("company_blog", "engineering_blog")
 
 
 # --- scheduling helpers ------------------------------------------------------
@@ -370,6 +380,45 @@ async def _discover_board(
     return f"discovered ATS board {board_url}"
 
 
+async def _discover_feed(
+    db: AsyncSession, source: Source, result: FetchResult
+) -> str | None:
+    """Register an RSS feed a blog page links to, if any.
+
+    A blog whose feed sits at an unguessable path (Keka's /hubfs/rss) still
+    advertises it in the page head. Finding it upgrades the fragile HTML scrape
+    to the RSS path. Returns a summary line when a feed was newly registered.
+    """
+    if source.company_id is None or source.source_type not in BLOG_SOURCE_TYPES:
+        return None
+    if not result.raw_html:
+        return None
+
+    feed_url = discover_feed_url(result.raw_html, source.url)
+    if feed_url is None:
+        return None
+
+    try:
+        created = await register_discovered_feed(db, source.company_id, feed_url)
+    except SSRFError as exc:
+        logger.warning("discovered feed %s rejected: %s", feed_url, exc)
+        return None
+
+    if created is None:
+        return None
+    return f"discovered RSS feed {feed_url}"
+
+
+async def _company_has_feed(db: AsyncSession, company_id: uuid.UUID) -> Source | None:
+    return await db.scalar(
+        select(Source).where(
+            Source.company_id == company_id,
+            Source.fetch_tier == "rss",
+            Source.status == "approved",
+        )
+    )
+
+
 def _feed_entries(result: FetchResult, source: Source) -> list[dict]:
     """Split a fetched payload into the entries the extractor should see.
 
@@ -413,12 +462,15 @@ async def _crawl_content(db: AsyncSession, source: Source) -> tuple[int, str, bo
 
     # Ahead of the pre-filter deliberately. A careers page whose visible text
     # is "there are no openings currently" gets rejected as irrelevant, yet it
-    # still names the board it embeds — and that board is the whole prize.
+    # still names the board it embeds — and that board is the whole prize. The
+    # same holds for a blog that links a feed but reads as thin on this crawl.
     board = await _discover_board(db, source, result)
+    feed = await _discover_feed(db, source, result)
+    discovery = board or feed
 
     if not is_relevant(result.content, source.source_type):
         _log(db, source, "success", result=result, text=result.content, changed=True)
-        return 0, board or "pre-filter rejected", True
+        return 0, discovery or "pre-filter rejected", True
 
     if source.company_id is None:
         # A news site with no company attached: resolve per entry instead.
@@ -429,6 +481,17 @@ async def _crawl_content(db: AsyncSession, source: Source) -> tuple[int, str, bo
     # data, and paying an LLM to re-read the wrapper around it is waste.
     if source.source_type == "career_page" and result.raw_html:
         return await _crawl_career_page(db, source, result)
+
+    # A blog whose feed is already tracked steps aside: the feed carries the
+    # same posts dated and one at a time, so re-reading the HTML index would
+    # only pay the LLM to reproduce what the feed already yields. The feed
+    # discovered on *this* crawl is not committed yet, so the scrape below still
+    # runs once as the fallback; the skip takes effect from the next crawl.
+    if source.fetch_tier == "static_http" and source.source_type in BLOG_SOURCE_TYPES:
+        tracked = await _company_has_feed(db, source.company_id)
+        if tracked is not None:
+            _log(db, source, "success", result=result, text=result.content, changed=True)
+            return 0, f"feed tracked ({tracked.url}), HTML scrape skipped", True
 
     # Per entry, not over the whole payload. A feed carries up to 25 posts and
     # only the entry knows its own article URL — attributing the batch to
@@ -453,7 +516,8 @@ async def _crawl_content(db: AsyncSession, source: Source) -> tuple[int, str, bo
         text=result.content, changed=True,
     )
     await compute_score(db, source.company_id, commit=False)
-    return events, f"{events} new events", True
+    summary = f"{events} new events"
+    return events, f"{discovery}; {summary}" if discovery else summary, True
 
 
 async def _crawl_career_page(
