@@ -85,6 +85,34 @@ The ATS sync closes any stored job missing from the incoming set, which is corre
 
 So reconciliation gained an `allow_close` flag, off for anything scraped. Related: scraped postings have no stable vendor id, so one is synthesised from the role's apply URL, falling back to a hash of title and location. The first version didn't collapse internal whitespace — a title gaining a double space between renders would have produced a new id, duplicating every role on every crawl. A test caught it. That test exists because of this specific near-miss.
 
+### The careers page that was a locked door
+
+Keka is a big India-origin HRMS, and its careers pages are single-page apps. Fetch the HTML and you get an empty shell, because the jobs load afterwards over JavaScript we don't run in production. So every company on Keka — and there are a lot of them — sat in the database producing exactly zero jobs while looking perfectly healthy in the dashboard.
+
+The way out was to stop scraping and start asking. Keka's careers widget quietly calls a public, unauthenticated JSON API; the catch is that the board id it needs is a GUID that never appears anywhere in the URL. It's hidden in the page's own document paths — `/ats/documents/<guid>/careerportal/...` — so the adapter reads the portal-info endpoint, pulls the GUID out of a logo path, and then asks the real jobs endpoint. Two anonymous GETs, no browser, structured roles with working apply links. One company went from nothing to thirteen real openings the first time it ran.
+
+### A source with no company is a black hole
+
+Jobs and events hang off a company row, and for a long time creating that row was a manual, upstream step. So you could add a careers source, approve it, watch it crawl "successfully" forever — and see nothing, because there was no company for the jobs to attach to, and nothing in the pipeline ever made one.
+
+Now an ATS source onboards its own company. The board's portal already knows who it belongs to — a name and a domain — so the crawler creates it, or matches an existing one by domain so you never end up with two of the same company, straight from the source. Add the URL, get a company and its jobs. This is only safe because the identity comes from the company's own board, not from prose that happens to mention it — the same reason the news matcher stays as paranoid as it does.
+
+### Shipping a provider doesn't fix the sources already added
+
+A source's fetch tier is decided once, when it's created, and then stored on the row. So the moment Keka support shipped, every Keka careers page already in the database was still parked on the old `static_http` tier, cheerfully doing nothing. Deploying code doesn't reach back and rewrite rows.
+
+That earned the admin console a "re-detect tier" button — plus delete and disable, which it somehow never had. One click re-runs detection and reschedules the source, and a stuck careers page turns into an ATS board. A lot of the "why is nothing showing for this company" debugging turned out to be one button away, once the button existed.
+
+### The feed that wasn't where anyone would look
+
+Blog sources only worked if you already knew the exact RSS URL, and the fetcher trustingly fetched whatever you handed it. Point it at a `/blog/feed` that doesn't exist and it 404s; point it at the blog's HTML page and it parses zero entries and returns *success*. Either way you get silence.
+
+Keka's blog is the case that made this obvious — no `/blog/feed`, no `/blog/rss.xml`, and the one path that does answer is an empty placeholder with zero posts. The real feed lives at `/hubfs/rss`, which nobody was ever going to guess. But the page advertises it in its head, the way every blog does, with `<link rel="alternate">`. So the crawler reads that now, adopts the real feed, and falls back to scraping the HTML only when there genuinely isn't one. And a feed that parses to zero entries is a visible failure instead of a healthy-looking zero, so a dead feed shows up in the dashboard rather than hiding inside it.
+
+### The button that lied
+
+"Crawl now" in the admin console dispatched the job to Celery. There is no Celery worker on the free tier. So it posted a task into the void and returned a cheerful success while nothing happened. It runs inline now — actually crawls the source inside the request and hands back what it found — which also means you can shove a specific source past the queue. That mattered, because the queue was the other half of the problem: the tick crawled three sources at a time, so with ~900 sources a freshly-added one waited days behind the backlog. Three was well under what the tick's own 50-second budget allowed, so it's eight now.
+
 ## Tradeoffs, stated plainly
 
 **In-process caching instead of Redis for dashboard aggregates.** Upstash bills per command, and paying one on every anonymous page view for data that changes at crawl frequency would have been the single largest line in the budget. The cost: two workers can disagree for up to one TTL, and the cache empties on restart. For public aggregates on one free instance, that is fine.
@@ -107,7 +135,7 @@ The live version runs on Render's free tier, Neon, Upstash, and free API quotas.
 
 **No headless browser.** Chromium does not fit in 512MB beside the application, and an OOM kill takes down the entire service rather than one crawl. `PLAYWRIGHT_MAX_CONCURRENT=0` disables the tier, and JS-rendered career pages fail with a clear message instead of being crawled. Given that three of four career pages I tested render client-side, this is the single biggest functional gap.
 
-**No Celery worker, no Beat.** The free tier offers one process that sleeps when idle, which is nowhere for a scheduler to live. GitHub Actions cron now calls HTTP endpoints that run the same jobs inline. It works, and it is strictly worse than a real worker: no parallelism, no retry semantics, and a batch of three sources per tick bounded by a 50-second deadline. Sources are leased before crawling, so nothing is lost when a request runs out of budget — it just waits.
+**No Celery worker, no Beat.** The free tier offers one process that sleeps when idle, which is nowhere for a scheduler to live. GitHub Actions cron now calls HTTP endpoints that run the same jobs inline. It works, and it is strictly worse than a real worker: no parallelism, no retry semantics, and a batch of eight sources per tick bounded by a 50-second deadline. Sources are leased before crawling, so nothing is lost when a request runs out of budget — it just waits.
 
 **Google Jobs coverage is a demo, not a feature.** SerpAPI's free tier is eight calls per day. Eight. That is enough to prove the integration works and nothing else.
 
@@ -145,7 +173,7 @@ uv run celery -A workers.celery_app beat --loglevel=info
 Tests and checks:
 
 ```bash
-uv run pytest                              # 319 pass, 7 skipped
+uv run pytest                              # 338 pass, 10 skipped
 uv run ruff check app/ workers/ tests/
 uv run mypy app
 ```
@@ -169,6 +197,6 @@ Migrations run at container start, because the free tier has no pre-deploy hook 
 
 ## Where it stands
 
-Nine tables, 48 endpoints, 319 passing tests, and a source registry of 886 rows. The pipeline runs end to end: fetch, filter, classify, extract, deduplicate, attribute, score.
+Nine tables, 338 passing tests, and a source registry of 886 rows. The pipeline runs end to end: fetch, filter, classify, extract, deduplicate, attribute, score — and now onboards a company straight from a supported ATS board, discovers a blog's real feed on its own, and lets an admin re-tier, force-crawl, or delete a source from the console.
 
 The interesting work left is not architectural. It is that the cheapest correct version of this system is now built, and finding out what it looks like with a budget would cost about fifteen dollars a month.
