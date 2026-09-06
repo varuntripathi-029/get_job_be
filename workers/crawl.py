@@ -622,7 +622,16 @@ async def _tick(db: AsyncSession) -> list[str]:
                     Source.next_crawl_at.is_not(None),
                     Source.next_crawl_at <= now,
                 )
-                .order_by(Source.next_crawl_at)
+                # Sources that have never landed a successful crawl go first, so a
+                # freshly added (or freshly re-tiered) source gets its first crawl
+                # in the next tick or two instead of waiting behind ~900 healthy
+                # ones ordered purely by due-time. Failing sources can't hog the
+                # queue this way: a failure pushes next_crawl_at far ahead, so they
+                # simply aren't due most ticks, and disable after enough tries.
+                .order_by(
+                    Source.last_successful_crawl_at.asc().nullsfirst(),
+                    Source.next_crawl_at,
+                )
                 .limit(DISPATCH_BATCH)
                 # Two overlapping ticks must not dispatch the same source; the
                 # second simply skips whatever the first has locked.
