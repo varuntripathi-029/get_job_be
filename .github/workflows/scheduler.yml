@@ -25,6 +25,9 @@ on:
     - cron: "10 3 * * *"
     # 00:20 and 12:20 UTC — resync every ATS board.
     - cron: "20 0,12 * * *"
+    # 00:50 UTC — promote sources now recognisable as a parseable ATS. Cheap and
+    # idempotent, so once a day is plenty to keep tiers in step with new adapters.
+    - cron: "50 0 * * *"
     # 02:30, 08:30, 14:30, 20:30 UTC — backfill embeddings.
     - cron: "30 2,8,14,20 * * *"
     # Monday 09:05 UTC — the weekly newsletter.
@@ -36,7 +39,7 @@ on:
         required: true
         default: tick
         type: choice
-        options: [tick, sync-jobs, embeddings, cleanup, newsletter]
+        options: [tick, sync-jobs, retier, embeddings, cleanup, newsletter]
 
 # A slow tick must not overlap the next one. Sources are leased before they are
 # crawled so an overlap would be safe, just wasteful — this keeps it tidy.
@@ -56,6 +59,7 @@ jobs:
             "*/15 * * * *")        job=tick ;;
             "10 3 * * *")         job=cleanup ;;
             "20 0,12 * * *")      job=sync-jobs ;;
+            "50 0 * * *")         job=retier ;;
             "30 2,8,14,20 * * *") job=embeddings ;;
             "5 9 * * 1")          job=newsletter ;;
             *)                    job="${{ inputs.job || 'tick' }}" ;;
